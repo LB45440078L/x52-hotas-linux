@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: BSD-3-Clause
 //
 // Thin RAII wrapper around libusb for the X52 Pro vendor control channel.
 //

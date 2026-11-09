@@ -102,7 +102,8 @@ Unit tests cover the parts where a mistake is invisible in the UI:
 - clock bit packing, including negative and out-of-range offsets,
 - profile round trip, clamping, validation and path sanitising,
 - engine semantics: passthrough, swallow, keys, shift fallback, modes,
-  macros, axis shaping, MFD rendering.
+  macros, axis shaping, MFD rendering,
+- drift statistics and the rest-position classifier.
 
 `tests/integration.cpp` (`x52_it`) drives real hardware: it writes text,
 sweeps the LEDs, programs the clock, parses input reports and restores a clean

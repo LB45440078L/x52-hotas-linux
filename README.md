@@ -36,6 +36,16 @@ hardware through the documented vendor control channel.
 - Per-mode LED themes that follow the mode selector
 - Shift and blink indicators
 
+**Test & diagnostics**
+
+- Live input map: every one of the 39 buttons lights up when pressed
+- Stick crosshair and throttle bar visualisation
+- Drift measurement: rest position and jitter per axis, with one-click
+  centre correction written into the profile
+- Axis feel: soft / linear / hard response plus deadzone, per axis
+- Health check: permissions, endpoints, virtual devices, grab, rest
+  positions, stuck buttons, clock refresh
+
 **Modes, profiles, remapping**
 
 - Three hardware modes (M1/M2/M3) with independent bindings and LED themes
@@ -93,7 +103,7 @@ sudo ./scripts/install-udev.sh
 
 ### Control panel
 
-`x52panel` has five pages:
+`x52panel` has six pages:
 
 | Page | What it does |
 | --- | --- |
@@ -101,6 +111,7 @@ sudo ./scripts/install-udev.sh
 | Display | custom text, brightness, clock and date, stopwatch |
 | LEDs | per-LED colours, brightness, shift indicator |
 | Buttons | per-mode and shift-layer bindings for all 39 buttons |
+| Test | live input, stick/throttle visualisation, drift, axis feel, diagnosis |
 | Profiles | activate, save, create, delete profiles |
 
 ### Command line
@@ -119,6 +130,8 @@ x52ctl profile list
 x52ctl profile load Demo
 x52ctl profile save "Elite Dangerous"
 x52ctl profile export elite.json
+x52ctl test                         # health check
+x52ctl drift 5                      # measure rest positions for 5 s
 x52ctl watch                        # live state stream
 ```
 
@@ -233,7 +246,7 @@ scripts/          install helpers
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
 cmake --build build
-./build/x52_tests                 # 64 unit tests
+./build/x52_tests                 # 70 unit tests
 ./build/x52_tests mfd             # filter by name
 X52_TEST_HARDWARE=1 ./build/x52_it # integration test, needs the device
 ```
@@ -249,9 +262,12 @@ layout in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   channel details here were verified against a live X52 Pro.
 - The Windows driver package was studied for behavioural parity (modes,
   profiles, MFD pages); no code from it is used.
-- `libx52` is licensed GPL-2.0 with a classpath exception; this project is
-  GPL-2.0-or-later, written from scratch.
+- `libx52` (GPL-2.0) was used only as documentation of the vendor API, which
+  Saitek published; no code from it is included here. The implementation in
+  this repository was written from scratch against the byte-level protocol and
+  verified on a live unit.
+- `nlohmann/json` (MIT) is vendored under `third_party/`.
 
 ## License
 
-GPL-2.0-or-later. See [LICENSE](LICENSE).
+BSD-3-Clause. See [LICENSE](LICENSE).

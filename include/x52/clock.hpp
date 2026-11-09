@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: BSD-3-Clause
 //
 // On-board clock / date programming.  The X52 Pro keeps its own clock, which
 // means the MFD keeps showing the correct time even when no software is

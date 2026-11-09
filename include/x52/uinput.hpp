@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: BSD-3-Clause
 //
 // uinput: creates virtual input devices so that remapped buttons and macros
 // reach games and the desktop exactly like a real keyboard / mouse / pad.

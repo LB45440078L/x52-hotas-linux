@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: BSD-3-Clause
 //
 // Model of the throttle multi-function display: three 16 character lines,
 // brightness and a dirty-line mechanism so that we only send what changed.

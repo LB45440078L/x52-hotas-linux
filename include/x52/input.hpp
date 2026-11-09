@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: BSD-3-Clause
 //
 // Reads the joystick's 15-byte HID input report straight from hidraw.  Going
 // through hidraw (instead of evdev) keeps the app independent of whatever

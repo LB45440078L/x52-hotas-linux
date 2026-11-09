@@ -20,3 +20,8 @@ KERNEL=="event*", ATTRS{idVendor}=="06a3", ATTRS{idProduct}=="0762", MODE="0660"
 
 # Traditional joystick node, harmless but useful for other software.
 KERNEL=="js*", ATTRS{idVendor}=="06a3", ATTRS{idProduct}=="0762", MODE="0660", GROUP="users", TAG+="uaccess"
+
+# Virtual devices created by x52d through uinput.  Without this games running
+# as the logged-in user cannot read the remapped joystick.
+KERNEL=="event*", ATTRS{name}=="X52 Pro*", MODE="0660", GROUP="users", TAG+="uaccess"
+KERNEL=="js*", ATTRS{name}=="X52 Pro*", MODE="0660", GROUP="users", TAG+="uaccess"

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: BSD-3-Clause
 //
 // Hardware integration test.  Requires the controller and permission to write
 // to the USB node; refuses to run unless X52_TEST_HARDWARE=1 so that a plain

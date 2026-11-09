@@ -130,6 +130,14 @@ Raw ranges: X/Y/twist 0–1023, throttle/rotaries/slider 0–255.
 | 19-22 | stick hat N/E/S/W | 36-37 | up/down |
 |  |  | 38 | MFD select |
 
+## Axis shaping and drift
+
+Drift is not a protocol feature: the potentiometers simply do not return to
+exactly 512.  The driver measures the rest value (mean of the raw reports),
+stores it as a per-axis `center` trim in the profile, and subtracts it before
+the deadzone and the response curve are applied.  Nothing is written to the
+device, so the correction survives firmware updates and is per profile.
+
 ## What the Windows driver does differently
 
 The Windows package ships `SaiK0762.sys`, which exposes four kernel interfaces

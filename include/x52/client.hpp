@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: BSD-3-Clause
 //
 // Small newline-JSON client for the x52d control socket, shared by the CLI
 // and the GTK4 panel.
