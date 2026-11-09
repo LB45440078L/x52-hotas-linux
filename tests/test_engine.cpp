@@ -342,3 +342,36 @@ TEST(engine_led_theme_reported) {
     CHECK(e.current_leds(colors));
     CHECK(colors[static_cast<std::size_t>(Led::T1)] == LedColor::Red);
 }
+
+TEST(engine_forwards_pov_hat) {
+    test::RecordingSink sink;
+    Engine e(&sink);
+    e.set_profile(Profile::make_default());
+
+    InputState st;
+    st.hat = 3;  // east
+    e.process(st, InputState{});
+    CHECK(!sink.hats.empty());
+    CHECK_EQ(sink.hats.back(), 3);
+}
+
+TEST(engine_forwards_ministick_as_second_hat) {
+    test::RecordingSink sink;
+    Engine e(&sink);
+    e.set_profile(Profile::make_default());
+
+    InputState st;
+    st.thumb_x = 0;   // full left
+    st.thumb_y = 15;  // full down
+    e.process(st, InputState{});
+    CHECK(!sink.thumbs.empty());
+    CHECK_EQ(sink.thumbs.back().first, -1);
+    CHECK_EQ(sink.thumbs.back().second, 1);
+
+    InputState centre;
+    centre.thumb_x = 8;
+    centre.thumb_y = 8;
+    e.process(centre, st);
+    CHECK_EQ(sink.thumbs.back().first, 0);
+    CHECK_EQ(sink.thumbs.back().second, 0);
+}

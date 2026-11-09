@@ -204,7 +204,9 @@ bool Uinput::create_joystick(const std::string& name, bool with_hat) {
     }
     if (with_hat) {
         if (!enable_abs(fd, ABS_HAT0X, -1, 1, 0, 0) ||
-            !enable_abs(fd, ABS_HAT0Y, -1, 1, 0, 0)) {
+            !enable_abs(fd, ABS_HAT0Y, -1, 1, 0, 0) ||
+            !enable_abs(fd, ABS_HAT1X, -1, 1, 0, 0) ||
+            !enable_abs(fd, ABS_HAT1Y, -1, 1, 0, 0)) {
             error_ = ioc_error("UI_ABS_SETUP(hat)");
             ::close(fd);
             return false;
@@ -322,6 +324,13 @@ void Uinput::hat(int direction) {
     }
     w.write_event(EV_ABS, ABS_HAT0X, x);
     w.write_event(EV_ABS, ABS_HAT0Y, y);
+    w.sync();
+}
+
+void Uinput::hat_secondary(int x, int y) {
+    EventWriter w{joy_fd_};
+    w.write_event(EV_ABS, ABS_HAT1X, x);
+    w.write_event(EV_ABS, ABS_HAT1Y, y);
     w.sync();
 }
 

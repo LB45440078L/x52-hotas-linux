@@ -95,6 +95,10 @@ public:
         u_.button(index, pressed);
     }
     void hat(int direction) override { u_.hat(direction); }
+    void thumb(int x, int y) override {
+        if (trace) std::fprintf(stderr, "event: thumb %d,%d\n", x, y);
+        u_.hat_secondary(x, y);
+    }
     void sync() override { u_.sync_keyboard(); u_.sync_mouse(); }
     void exec(const std::string& command) override {
         pid_t pid = ::fork();

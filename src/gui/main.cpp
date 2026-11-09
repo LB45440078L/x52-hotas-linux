@@ -78,6 +78,15 @@ struct App {
     GtkWidget* button_pills[kButtonCount] = {nullptr};
     GtkWidget* stick_area = nullptr;
     GtkWidget* throttle_area = nullptr;
+    GtkWidget* hat_area = nullptr;
+    GtkWidget* mini_area = nullptr;
+    GtkWidget* hat_label = nullptr;
+    GtkWidget* mini_label = nullptr;
+    int pov_hat = 0;
+    int thumb_x = 8;
+    int thumb_y = 8;
+    std::string hat_text;
+    std::string mini_text;
     GtkWidget* drift_button = nullptr;
     GtkWidget* drift_detail = nullptr;
     GtkWidget* checks_box = nullptr;
@@ -293,6 +302,72 @@ void set_pill(GtkWidget* label, const char* level, const char* text) {
 // ---------------------------------------------------------------------------
 // state rendering
 // ---------------------------------------------------------------------------
+const char* hat_direction_name(int hat) {
+    static const char* names[9] = {"CENTRE", "N", "NE", "E", "SE", "S", "SW", "W", "NW"};
+    return (hat >= 0 && hat <= 8) ? names[hat] : "--";
+}
+
+// Eight direction lamps; the active one lights up.
+void draw_hat(GtkDrawingArea*, cairo_t* cr, int width, int height, gpointer data) {
+    App* a = static_cast<App*>(data);
+    double cx = width / 2.0;
+    double cy = height / 2.0;
+    double r = std::fmin(width, height) / 2.0 - 10.0;
+
+    cairo_set_source_rgba(cr, 0.5, 0.55, 0.6, 0.18);
+    cairo_set_line_width(cr, 1.4);
+    cairo_arc(cr, cx, cy, r, 0, 2 * M_PI);
+    cairo_stroke(cr);
+
+    for (int i = 1; i <= 8; ++i) {
+        double ang = -M_PI / 2.0 + (i - 1) * M_PI / 4.0;
+        double mx = cx + std::cos(ang) * r * 0.70;
+        double my = cy + std::sin(ang) * r * 0.70;
+        bool on = (a->pov_hat == i);
+        cairo_set_source_rgba(cr, on ? 0.18 : 0.55, on ? 0.85 : 0.60, on ? 0.45 : 0.65,
+                              on ? 1.0 : 0.28);
+        cairo_arc(cr, mx, my, on ? 9.0 : 6.0, 0, 2 * M_PI);
+        cairo_fill(cr);
+    }
+
+    cairo_set_source_rgba(cr, 0.5, 0.55, 0.6, a->pov_hat == 0 ? 0.55 : 0.15);
+    cairo_arc(cr, cx, cy, 4.0, 0, 2 * M_PI);
+    cairo_fill(cr);
+}
+
+// Throttle ministick: raw 4-bit position on a square pad.
+void draw_ministick(GtkDrawingArea*, cairo_t* cr, int width, int height, gpointer data) {
+    App* a = static_cast<App*>(data);
+    double pad = 10.0;
+    double size = std::fmin(width, height) - 2 * pad;
+
+    cairo_set_source_rgba(cr, 0.5, 0.55, 0.6, 0.10);
+    cairo_rectangle(cr, pad, pad, size, size);
+    cairo_fill(cr);
+
+    cairo_set_source_rgba(cr, 0.5, 0.55, 0.6, 0.30);
+    cairo_set_line_width(cr, 1.0);
+    cairo_move_to(cr, pad + size / 2, pad);
+    cairo_line_to(cr, pad + size / 2, pad + size);
+    cairo_move_to(cr, pad, pad + size / 2);
+    cairo_line_to(cr, pad + size, pad + size / 2);
+    cairo_stroke(cr);
+
+    // dead zone square
+    cairo_set_source_rgba(cr, 0.5, 0.55, 0.6, 0.18);
+    cairo_rectangle(cr, pad + size * 0.38, pad + size * 0.38, size * 0.24, size * 0.24);
+    cairo_stroke(cr);
+
+    double fx = pad + (a->thumb_x / 15.0) * size;
+    double fy = pad + (a->thumb_y / 15.0) * size;
+    cairo_set_source_rgba(cr, 0.20, 0.85, 0.45, 0.30);
+    cairo_arc(cr, fx, fy, 10, 0, 2 * M_PI);
+    cairo_fill(cr);
+    cairo_set_source_rgba(cr, 0.20, 0.95, 0.50, 1.0);
+    cairo_arc(cr, fx, fy, 5, 0, 2 * M_PI);
+    cairo_fill(cr);
+}
+
 void draw_stick(GtkDrawingArea*, cairo_t* cr, int width, int height, gpointer data) {
     App* a = static_cast<App*>(data);
     double cx = width / 2.0;
@@ -393,6 +468,36 @@ void apply_input(App* a, const json& d) {
         if (a->throttle_area) gtk_widget_queue_draw(a->throttle_area);
     }
     if (d.contains("b")) set_button_pills(a, d["b"].get<uint64_t>());
+
+    if (d.contains("h")) {
+        int hat = d["h"].get<int>();
+        if (hat != a->pov_hat) {
+            a->pov_hat = hat;
+            if (a->hat_area) gtk_widget_queue_draw(a->hat_area);
+        }
+        std::string text = std::string("POV hat: ") + hat_direction_name(hat);
+        if (a->hat_label && text != a->hat_text) {
+            a->hat_text = text;
+            gtk_label_set_text(GTK_LABEL(a->hat_label), text.c_str());
+        }
+    }
+
+    if (d.contains("tx") && d.contains("ty")) {
+        int tx = d["tx"].get<int>();
+        int ty = d["ty"].get<int>();
+        if (tx != a->thumb_x || ty != a->thumb_y) {
+            a->thumb_x = tx;
+            a->thumb_y = ty;
+            if (a->mini_area) gtk_widget_queue_draw(a->mini_area);
+        }
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "Ministick: %2d, %2d", tx, ty);
+        std::string text = buf;
+        if (a->mini_label && text != a->mini_text) {
+            a->mini_text = text;
+            gtk_label_set_text(GTK_LABEL(a->mini_label), text.c_str());
+        }
+    }
 }
 
 void apply_state(App* a, const json& st) {
@@ -1287,6 +1392,44 @@ GtkWidget* build_test(App* a) {
         a->button_pills[i] = p;
     }
     gtk_box_append(GTK_BOX(live), grid);
+
+    GtkWidget* extra = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 26);
+    gtk_widget_set_margin_top(extra, 14);
+    gtk_widget_set_margin_bottom(extra, 18);
+    gtk_widget_set_margin_start(extra, 18);
+    gtk_widget_set_margin_end(extra, 18);
+
+    GtkWidget* hat_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    GtkWidget* hat = gtk_drawing_area_new();
+    gtk_widget_set_size_request(hat, 120, 120);
+    gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(hat), draw_hat, a, nullptr);
+    a->hat_area = hat;
+    gtk_box_append(GTK_BOX(hat_box), hat);
+    GtkWidget* hat_caption = gtk_label_new("POV hat");
+    gtk_widget_add_css_class(hat_caption, "row-sub");
+    gtk_box_append(GTK_BOX(hat_box), hat_caption);
+    a->hat_label = gtk_label_new("POV hat: CENTRE");
+    gtk_widget_add_css_class(a->hat_label, "mono");
+    gtk_box_append(GTK_BOX(hat_box), a->hat_label);
+    a->hat_text = "POV hat: CENTRE";
+    gtk_box_append(GTK_BOX(extra), hat_box);
+
+    GtkWidget* mini_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    GtkWidget* mini = gtk_drawing_area_new();
+    gtk_widget_set_size_request(mini, 120, 120);
+    gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(mini), draw_ministick, a, nullptr);
+    a->mini_area = mini;
+    gtk_box_append(GTK_BOX(mini_box), mini);
+    GtkWidget* mini_caption = gtk_label_new("Throttle ministick");
+    gtk_widget_add_css_class(mini_caption, "row-sub");
+    gtk_box_append(GTK_BOX(mini_box), mini_caption);
+    a->mini_label = gtk_label_new("Ministick:  8,  8");
+    gtk_widget_add_css_class(a->mini_label, "mono");
+    gtk_box_append(GTK_BOX(mini_box), a->mini_label);
+    a->mini_text = "Ministick:  8,  8";
+    gtk_box_append(GTK_BOX(extra), mini_box);
+
+    gtk_box_append(GTK_BOX(live), extra);
     gtk_box_append(GTK_BOX(body), live);
 
     // --- drift --------------------------------------------------------------

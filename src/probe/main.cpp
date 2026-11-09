@@ -254,9 +254,11 @@ int cmd_listen(int seconds) {
             continue;
         }
         if (st == prev) continue;
-        std::printf("X=%4d Y=%4d T=%4d THR=%3d RX=%3d RY=%3d SL=%3d hat=%d thumb=%d,%d btns:",
+        std::printf("X=%4d Y=%4d T=%4d THR=%3d RX=%3d RY=%3d SL=%3d hat=%d thumb=%d,%d raw=",
                     st.axis[0], st.axis[1], st.axis[2], st.axis[3], st.axis[4], st.axis[5],
                     st.axis[6], st.hat, st.thumb_x, st.thumb_y);
+        for (std::size_t k = 0; k < x52::kRawReportSize; ++k) std::printf("%02x", st.raw[k]);
+        std::printf(" btns:");
         for (std::size_t i = 0; i < x52::kButtonCount; ++i) {
             if (st.buttons[i]) std::printf(" %zu", i);
         }

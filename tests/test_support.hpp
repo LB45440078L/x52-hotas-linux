@@ -61,6 +61,7 @@ struct RecordingSink : OutputSink {
     std::vector<int> wheels;
     std::vector<std::pair<int, int>> axes;
     std::vector<int> hats;
+    std::vector<std::pair<int, int>> thumbs;
     std::vector<std::string> execs;
     int syncs = 0;
 
@@ -70,6 +71,7 @@ struct RecordingSink : OutputSink {
     void axis(int index, int value) override { axes.emplace_back(index, value); }
     void button(int index, bool pressed) override { buttons.emplace_back(index, pressed); }
     void hat(int direction) override { hats.push_back(direction); }
+    void thumb(int x, int y) override { thumbs.emplace_back(x, y); }
     void sync() override { ++syncs; }
     void exec(const std::string& cmd) override { execs.push_back(cmd); }
 
@@ -92,6 +94,7 @@ struct RecordingSink : OutputSink {
         wheels.clear();
         axes.clear();
         hats.clear();
+        thumbs.clear();
         execs.clear();
         syncs = 0;
     }

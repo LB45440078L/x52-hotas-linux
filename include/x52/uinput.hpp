@@ -34,6 +34,7 @@ public:
     void axis(int index, int value);
     void button(int index, bool pressed);
     void hat(int direction);  // 0 = centre, 1..8 clockwise from north
+    void hat_secondary(int x, int y);  // throttle ministick as a second hat
 
     // Keyboard / mouse
     void key(uint16_t code, bool pressed);

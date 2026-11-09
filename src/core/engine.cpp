@@ -244,6 +244,9 @@ void Engine::set_profile(const Profile& p) {
     profile_ = p;
     page_ = p.settings.mfd_page;
     last_axis_.fill(-1);  // force a full axis refresh
+    last_hat_ = -1;
+    last_thumb_x_ = -1;
+    last_thumb_y_ = -1;
     mode_ = std::clamp(mode_, 1, kModeCount);  // keep the current mode
     shift_ = false;
     last_buttons_.fill(false);
@@ -454,6 +457,7 @@ void Engine::process(const InputState& cur, const InputState& /*prev*/) {
 
     apply_axis(cur);
     apply_hat(cur);
+    apply_thumb(cur);
 }
 
 void Engine::apply_axis(const InputState& st) {
@@ -482,6 +486,18 @@ void Engine::apply_hat(const InputState& st) {
     if (st.hat == last_hat_) return;
     last_hat_ = st.hat;
     sink_->hat(st.hat);
+}
+
+// The 4-bit ministick has no evdev axis on the physical device, so it is
+// forwarded as a second hat: centre 6..10, else -1/0/1 per axis.
+void Engine::apply_thumb(const InputState& st) {
+    if (!sink_) return;
+    if (st.thumb_x == last_thumb_x_ && st.thumb_y == last_thumb_y_) return;
+    last_thumb_x_ = st.thumb_x;
+    last_thumb_y_ = st.thumb_y;
+
+    auto axis = [](int v) { return v <= 6 ? -1 : (v >= 10 ? 1 : 0); };
+    sink_->thumb(axis(st.thumb_x), axis(st.thumb_y));
 }
 
 void Engine::tick(uint64_t now_us) {

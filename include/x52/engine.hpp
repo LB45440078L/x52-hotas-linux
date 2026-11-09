@@ -27,6 +27,8 @@ public:
     virtual void axis(int index, int value) = 0;
     virtual void button(int index, bool pressed) = 0;
     virtual void hat(int direction) = 0;
+    // Throttle ministick, so the virtual pad can expose it as a second hat.
+    virtual void thumb(int x, int y) { (void)x; (void)y; }
     virtual void sync() = 0;
     virtual void exec(const std::string& command) { (void)command; }
 };
@@ -102,6 +104,7 @@ private:
     void start_macro(const Action& a);
     void apply_axis(const InputState& st);
     void apply_hat(const InputState& st);
+    void apply_thumb(const InputState& st);
 
     OutputSink* sink_ = nullptr;
     Profile profile_ = Profile::make_default();
@@ -121,6 +124,8 @@ private:
     std::array<bool, kButtonCount> last_buttons_{};
     std::array<int, kAxisCount> last_axis_{};
     int last_hat_ = -1;
+    int last_thumb_x_ = -1;
+    int last_thumb_y_ = -1;
     uint64_t now_us_ = 0;
 };
 

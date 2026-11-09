@@ -80,6 +80,7 @@ bool parse_report(const uint8_t* d, std::size_t length, InputState& out) noexcep
     out.hat = (d[13] >> 4) & 0x0f;
     out.thumb_y = d[14] & 0x0f;
     out.thumb_x = (d[14] >> 4) & 0x0f;
+    for (std::size_t i = 0; i < kRawReportSize; ++i) out.raw[i] = d[i];
     return true;
 }
 

@@ -24,6 +24,7 @@ struct InputState {
     int hat = 0;        // 0 = centred, 1..8 = clockwise starting north
     int thumb_x = 0;    // 0..15
     int thumb_y = 0;    // 0..15
+    std::array<uint8_t, kRawReportSize> raw{};  // last report, for diagnostics
     int device_index = -1;
 
     // Normalised axis value in 0..1 (respecting the raw range of each axis).
