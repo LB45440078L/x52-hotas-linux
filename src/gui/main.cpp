@@ -1,15 +1,16 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: BSD-3-Clause
 //
 // x52panel - GTK4 / libadwaita control panel for the X52 Pro.
 //
-// The panel is a thin client: it talks to x52d over the control socket and
-// never touches the hardware directly, so the daemon can keep running while
-// the window is closed.
+// A thin client of x52d: the daemon owns the device, the panel renders state
+// and sends commands.  Layout follows the system-settings pattern: sidebar
+// navigation, grouped cards, large page titles.
 //
 #include <adwaita.h>
 #include <gtk/gtk.h>
 
-#include <array>
+#include <cmath>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -26,31 +27,34 @@ using namespace x52;
 
 namespace {
 
-constexpr int kPollMs = 300;
+constexpr int kPollMs = 250;
 
-const char* kActionNames[] = {"Passthrough", "None", "Key", "Mouse button", "Wheel",
-                              "Macro", "Switch mode", "MFD page", "Run command",
-                              "Joystick button", nullptr};
+const char* kActionNames[] = {"Passthrough", "Swallow", "Keyboard key", "Mouse button",
+                              "Mouse wheel", "Macro", "Switch mode", "MFD page",
+                              "Run command", "Joystick button", nullptr};
 const char* kActionIds[] = {"passthrough", "none", "key", "mouse", "wheel",
-                            "macro", "mode", "mfd_page", "exec", "button"};
+                            "macro", "mode", "mfd_page", "exec", "button", nullptr};
 const char* kPageNames[] = {"Clock", "Stopwatch", "Status", "Custom text", "Profile", nullptr};
-const char* kPageIds[] = {"clock", "stopwatch", "status", "custom", "profile"};
+const char* kPageIds[] = {"clock", "stopwatch", "status", "custom", "profile", nullptr};
+const char* kAxisLabels[] = {"Roll (X)", "Pitch (Y)", "Yaw (twist)", "Throttle",
+                             "Rotary X", "Rotary Y", "Slider", nullptr};
+const char* kAxisIds[] = {"x", "y", "twist", "throttle", "rotary-x", "rotary-y", "slider",
+                          nullptr};
 
 struct App {
     GtkApplication* app = nullptr;
     GtkWindow* window = nullptr;
-
     GtkWidget* stack = nullptr;
-    GtkWidget* status_label = nullptr;
-    GtkWidget* status_pill = nullptr;
-    GtkWidget* mfd_lines[3] = {nullptr, nullptr, nullptr};
-    GtkWidget* axis_bars[kAxisCount] = {nullptr};
-    GtkWidget* axis_labels[kAxisCount] = {nullptr};
-    GtkWidget* mode_buttons[3] = {nullptr};
-    GtkWidget* page_drop = nullptr;
-    GtkWidget* led_rows[static_cast<int>(Led::Count)] = {nullptr};
+    GtkWidget* window_subtitle = nullptr;
 
-    // display page
+    GtkWidget* pill = nullptr;
+    GtkWidget* mfd_lines[3] = {nullptr, nullptr, nullptr};
+    GtkWidget* mode_buttons[3] = {nullptr, nullptr, nullptr};
+    GtkWidget* page_drop = nullptr;
+
+    GtkWidget* axis_bars[kAxisCount] = {nullptr};
+    GtkWidget* axis_values[kAxisCount] = {nullptr};
+
     GtkWidget* text_entries[3] = {nullptr, nullptr, nullptr};
     GtkWidget* mfd_bright = nullptr;
     GtkWidget* led_bright = nullptr;
@@ -59,40 +63,70 @@ struct App {
     GtkWidget* offs3 = nullptr;
     GtkWidget* stopwatch_label = nullptr;
 
-    // buttons page
+    GtkWidget* led_dots[static_cast<int>(Led::Count)] = {nullptr};
+
     GtkWidget* layer_mode_drop = nullptr;
     GtkWidget* shift_switch = nullptr;
-    GtkWidget* button_rows[kButtonCount] = {nullptr};
-    GtkWidget* button_action[kButtonCount] = {nullptr};
-    GtkWidget* button_arg[kButtonCount] = {nullptr};
-    GtkWidget* button_apply = nullptr;
     GtkWidget* buttons_box = nullptr;
+    GtkWidget* btn_action[kButtonCount] = {nullptr};
+    GtkWidget* btn_arg[kButtonCount] = {nullptr};
 
-    // profiles page
+    GtkWidget* button_pills[kButtonCount] = {nullptr};
+    GtkWidget* stick_area = nullptr;
+    GtkWidget* throttle_area = nullptr;
+    GtkWidget* drift_button = nullptr;
+    GtkWidget* drift_detail = nullptr;
+    GtkWidget* checks_box = nullptr;
+    GtkWidget* checks_pill = nullptr;
+    GtkWidget* feel_drop = nullptr;
+    GtkWidget* feel_deadzone = nullptr;
+    GtkWidget* feel_curve = nullptr;
+
     GtkWidget* profile_list = nullptr;
-    GtkWidget* profile_name_entry = nullptr;
+    GtkWidget* profile_name = nullptr;
 
     Client client;
     json profile = json::object();
     json state = json::object();
-    guint poll_id = 0;
+    double stick_x = 0.5;
+    double stick_y = 0.5;
+    double throttle = 0.0;
     bool suppress = false;
+    guint poll_id = 0;
 };
 
+// ---------------------------------------------------------------------------
+// styling
+// ---------------------------------------------------------------------------
 void css_install() {
     const char* css =
-        ".lcd { background-color: #07160c; border-radius: 10px; padding: 14px 18px; }\n"
-        ".lcd-line { color: #74ff88; font-family: monospace; font-size: 19px; "
-        "letter-spacing: 3px; }\n"
-        ".pill { border-radius: 999px; padding: 2px 10px; font-size: 12px; font-weight: bold; }\n"
-        ".pill-ok { background-color: alpha(#33d17a, 0.22); color: #33d17a; }\n"
+        ".sidebar-pane { background-color: alpha(currentColor, 0.035); }\n"
+        ".page-title { font-size: 26px; font-weight: 800; letter-spacing: -0.02em; }\n"
+        ".page-sub { font-size: 13px; opacity: 0.55; }\n"
+        ".card { background-color: alpha(currentColor, 0.05); border-radius: 14px; }\n"
+        ".card-head { padding: 14px 18px 2px 18px; }\n"
+        ".card-title { font-weight: 700; font-size: 11px; letter-spacing: 0.09em; opacity: 0.55; }\n"
+        ".row { padding: 11px 18px; min-height: 30px; }\n"
+        ".row-title { font-size: 14px; }\n"
+        ".row-sub { font-size: 12px; opacity: 0.55; }\n"
+        ".sep { min-height: 1px; background-color: alpha(currentColor, 0.08); margin: 0 18px; }\n"
+        ".lcd { background-color: #06140a; border-radius: 12px; padding: 16px 20px; }\n"
+        ".lcd-line { color: #7dff92; font-family: monospace; font-size: 20px; letter-spacing: 3px; }\n"
+        ".pill { border-radius: 999px; padding: 3px 11px; font-size: 11px; font-weight: 700; }\n"
+        ".pill-ok { background-color: alpha(#2ec27e, 0.20); color: #2ec27e; }\n"
+        ".pill-warn { background-color: alpha(#e5a50a, 0.22); color: #e5a50a; }\n"
         ".pill-bad { background-color: alpha(#e01b24, 0.22); color: #ff6b6b; }\n"
-        ".led-dot { min-width: 12px; min-height: 12px; border-radius: 999px; }\n"
-        ".led-off { background-color: #555; }\n"
-        ".led-red { background-color: #ff3b30; }\n"
+        ".key-pill { border-radius: 8px; padding: 7px 3px; font-size: 11px; font-weight: 600;\n"
+        "            background-color: alpha(currentColor, 0.07); }\n"
+        ".key-pill.on { background-color: #2ec27e; color: #04180c; }\n"
+        ".key-pill.mode { background-color: alpha(#3584e4, 0.28); }\n"
+        ".led-dot { min-width: 10px; min-height: 10px; border-radius: 999px; }\n"
+        ".led-off { background-color: alpha(currentColor, 0.25); }\n"
+        ".led-red { background-color: #ff453a; }\n"
         ".led-amber { background-color: #ff9f0a; }\n"
-        ".led-green { background-color: #30d158; }\n"
-        ".dim { opacity: 0.65; }\n";
+        ".led-green { background-color: #32d74b; }\n"
+        ".mono { font-family: monospace; }\n"
+        ".big-number { font-size: 20px; font-weight: 700; font-family: monospace; }\n";
 
     GtkCssProvider* provider = gtk_css_provider_new();
     gtk_css_provider_load_from_string(provider, css);
@@ -103,42 +137,117 @@ void css_install() {
 }
 
 // ---------------------------------------------------------------------------
-// daemon helpers
+// daemon plumbing
 // ---------------------------------------------------------------------------
 bool ensure_client(App* a) {
     if (a->client.is_connected()) return true;
-    return a->client.connect(default_socket_path(), 800);
+    return a->client.connect(default_socket_path(), 600);
 }
 
 json call(App* a, const std::string& cmd, const json& args = json::object()) {
     json result;
     std::string error;
-    if (!ensure_client(a)) {
-        return json{{"__error", "daemon not reachable"}};
-    }
-    if (!a->client.request(cmd, args, result, error)) {
-        return json{{"__error", error}};
-    }
+    if (!ensure_client(a)) return json{{"__error", "daemon not running"}};
+    if (!a->client.request(cmd, args, result, error)) return json{{"__error", error}};
     return result;
 }
 
-void toast_error(App* a, const std::string& message) {
+void toast(App* a, const std::string& message) {
     if (!a->window) return;
-    AdwToast* toast = adw_toast_new(message.c_str());
-    AdwToastOverlay* overlay = ADW_TOAST_OVERLAY(g_object_get_data(G_OBJECT(a->window), "overlay"));
-    if (overlay) adw_toast_overlay_add_toast(overlay, toast);
-}
-
-void refresh_profile(App* a) {
-    json r = call(a, "profile", {{"action", "get"}});
-    if (r.contains("__error")) return;
-    if (r.contains("profile")) a->profile = r["profile"];
+    AdwToastOverlay* overlay =
+        ADW_TOAST_OVERLAY(g_object_get_data(G_OBJECT(a->window), "overlay"));
+    if (!overlay) return;
+    adw_toast_overlay_add_toast(overlay, adw_toast_new(message.c_str()));
 }
 
 // ---------------------------------------------------------------------------
-// widget helpers
+// builders
 // ---------------------------------------------------------------------------
-GtkWidget* lcd_box(App* a) {
+GtkWidget* page_root(const char* title, const char* subtitle, GtkWidget** body_out) {
+    GtkWidget* scroll = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll), GTK_POLICY_NEVER,
+                                   GTK_POLICY_AUTOMATIC);
+    GtkWidget* box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 18);
+    gtk_widget_set_margin_top(box, 26);
+    gtk_widget_set_margin_bottom(box, 34);
+    gtk_widget_set_margin_start(box, 28);
+    gtk_widget_set_margin_end(box, 28);
+
+    GtkWidget* head = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    GtkWidget* t = gtk_label_new(title);
+    gtk_widget_add_css_class(t, "page-title");
+    gtk_label_set_xalign(GTK_LABEL(t), 0.0f);
+    gtk_box_append(GTK_BOX(head), t);
+    if (subtitle) {
+        GtkWidget* s = gtk_label_new(subtitle);
+        gtk_widget_add_css_class(s, "page-sub");
+        gtk_label_set_xalign(GTK_LABEL(s), 0.0f);
+        gtk_label_set_wrap(GTK_LABEL(s), TRUE);
+        gtk_label_set_max_width_chars(GTK_LABEL(s), 70);
+        gtk_box_append(GTK_BOX(head), s);
+    }
+    gtk_box_append(GTK_BOX(box), head);
+
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), box);
+    *body_out = box;
+    return scroll;
+}
+
+GtkWidget* card(const char* title, const char* subtitle) {
+    GtkWidget* c = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_add_css_class(c, "card");
+    if (title) {
+        GtkWidget* head = gtk_box_new(GTK_ORIENTATION_VERTICAL, 1);
+        gtk_widget_add_css_class(head, "card-head");
+        GtkWidget* t = gtk_label_new(title);
+        gtk_widget_add_css_class(t, "card-title");
+        gtk_label_set_xalign(GTK_LABEL(t), 0.0f);
+        gtk_box_append(GTK_BOX(head), t);
+        if (subtitle) {
+            GtkWidget* s = gtk_label_new(subtitle);
+            gtk_widget_add_css_class(s, "row-sub");
+            gtk_label_set_xalign(GTK_LABEL(s), 0.0f);
+            gtk_label_set_wrap(GTK_LABEL(s), TRUE);
+            gtk_box_append(GTK_BOX(head), s);
+        }
+        gtk_box_append(GTK_BOX(c), head);
+    }
+    return c;
+}
+
+GtkWidget* row(const char* title, const char* subtitle, GtkWidget* control) {
+    GtkWidget* r = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+    gtk_widget_add_css_class(r, "row");
+    GtkWidget* text = gtk_box_new(GTK_ORIENTATION_VERTICAL, 1);
+    gtk_widget_set_hexpand(text, TRUE);
+    GtkWidget* t = gtk_label_new(title);
+    gtk_widget_add_css_class(t, "row-title");
+    gtk_label_set_xalign(GTK_LABEL(t), 0.0f);
+    gtk_box_append(GTK_BOX(text), t);
+    if (subtitle) {
+        GtkWidget* s = gtk_label_new(subtitle);
+        gtk_widget_add_css_class(s, "row-sub");
+        gtk_label_set_xalign(GTK_LABEL(s), 0.0f);
+        gtk_label_set_wrap(GTK_LABEL(s), TRUE);
+        gtk_label_set_max_width_chars(GTK_LABEL(s), 55);
+        gtk_box_append(GTK_BOX(text), s);
+    }
+    gtk_box_append(GTK_BOX(r), text);
+    if (control) {
+        gtk_widget_set_valign(control, GTK_ALIGN_CENTER);
+        gtk_box_append(GTK_BOX(r), control);
+    }
+    return r;
+}
+
+void add_row(GtkWidget* c, GtkWidget* r) {
+    gtk_box_append(GTK_BOX(c), r);
+    GtkWidget* sep = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_add_css_class(sep, "sep");
+    gtk_box_append(GTK_BOX(c), sep);
+}
+
+GtkWidget* lcd_widget(App* a) {
     GtkWidget* box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
     gtk_widget_add_css_class(box, "lcd");
     for (int i = 0; i < 3; ++i) {
@@ -152,67 +261,113 @@ GtkWidget* lcd_box(App* a) {
     return box;
 }
 
-GtkWidget* row(const char* title, const char* subtitle) {
-    AdwActionRow* r = ADW_ACTION_ROW(adw_action_row_new());
-    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(r), title);
-    if (subtitle) adw_action_row_set_subtitle(r, subtitle);
-    return GTK_WIDGET(r);
-}
-
 GtkWidget* slider(int min, int max, int value, GtkWidget** out) {
     GtkWidget* s = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, min, max, 1);
     gtk_range_set_value(GTK_RANGE(s), value);
-    gtk_widget_set_size_request(s, 220, -1);
     gtk_scale_set_draw_value(GTK_SCALE(s), TRUE);
     gtk_scale_set_value_pos(GTK_SCALE(s), GTK_POS_RIGHT);
+    gtk_widget_set_size_request(s, 200, -1);
     *out = s;
     return s;
 }
 
-void set_pill(GtkWidget* label, bool ok, const char* text) {
+void set_pill(GtkWidget* label, const char* level, const char* text) {
     gtk_label_set_text(GTK_LABEL(label), text);
-    gtk_widget_remove_css_class(label, "pill-ok");
-    gtk_widget_remove_css_class(label, "pill-bad");
+    for (const char* c : {"pill-ok", "pill-warn", "pill-bad"}) {
+        gtk_widget_remove_css_class(label, c);
+    }
     gtk_widget_add_css_class(label, "pill");
-    gtk_widget_add_css_class(label, ok ? "pill-ok" : "pill-bad");
+    gtk_widget_add_css_class(label, level);
 }
 
 // ---------------------------------------------------------------------------
-// state -> UI
+// state rendering
 // ---------------------------------------------------------------------------
+void draw_stick(GtkDrawingArea*, cairo_t* cr, int width, int height, gpointer data) {
+    App* a = static_cast<App*>(data);
+    double cx = width / 2.0;
+    double cy = height / 2.0;
+    double r = std::fmin(width, height) / 2.0 - 10.0;
+
+    cairo_set_source_rgba(cr, 0.5, 0.55, 0.6, 0.18);
+    cairo_set_line_width(cr, 1.0);
+    cairo_arc(cr, cx, cy, r, 0, 2 * M_PI);
+    cairo_stroke(cr);
+    cairo_arc(cr, cx, cy, r * 0.55, 0, 2 * M_PI);
+    cairo_stroke(cr);
+
+    cairo_set_source_rgba(cr, 0.5, 0.55, 0.6, 0.35);
+    cairo_move_to(cr, cx - r, cy);
+    cairo_line_to(cr, cx + r, cy);
+    cairo_move_to(cr, cx, cy - r);
+    cairo_line_to(cr, cx, cy + r);
+    cairo_stroke(cr);
+
+    double px = cx + (a->stick_x * 2.0 - 1.0) * r * 0.92;
+    double py = cy - (a->stick_y * 2.0 - 1.0) * r * 0.92;
+    cairo_set_source_rgba(cr, 0.20, 0.85, 0.45, 0.35);
+    cairo_arc(cr, px, py, 11, 0, 2 * M_PI);
+    cairo_fill(cr);
+    cairo_set_source_rgba(cr, 0.20, 0.95, 0.50, 1.0);
+    cairo_arc(cr, px, py, 6, 0, 2 * M_PI);
+    cairo_fill(cr);
+}
+
+void draw_throttle(GtkDrawingArea*, cairo_t* cr, int width, int height, gpointer data) {
+    App* a = static_cast<App*>(data);
+    double pad = 10;
+    double track = width - 2 * pad;
+    double h = height - 2 * pad;
+
+    cairo_set_source_rgba(cr, 0.5, 0.55, 0.6, 0.16);
+    cairo_rectangle(cr, pad, pad, track, h);
+    cairo_fill(cr);
+
+    double fill = h * a->throttle;
+    cairo_set_source_rgba(cr, 0.20, 0.85, 0.45, 0.9);
+    cairo_rectangle(cr, pad, pad + h - fill, track, fill);
+    cairo_fill(cr);
+
+    cairo_set_source_rgba(cr, 0.5, 0.55, 0.6, 0.5);
+    cairo_set_line_width(cr, 1.0);
+    for (int i = 0; i <= 4; ++i) {
+        double y = pad + h * i / 4.0;
+        cairo_move_to(cr, pad, y);
+        cairo_line_to(cr, pad + track, y);
+    }
+    cairo_stroke(cr);
+}
+
+void refresh_profile(App* a);
+void on_clock_settings(GObject*, GParamSpec*, gpointer data);
+
 void update_state(App* a) {
     json st = call(a, "get_state");
     if (st.contains("__error")) {
-        set_pill(a->status_pill, false, "daemon offline");
-        gtk_label_set_text(GTK_LABEL(a->status_label), st["__error"].get<std::string>().c_str());
+        set_pill(a->pill, "pill-bad", "offline");
+        if (a->window_subtitle) {
+            gtk_label_set_text(GTK_LABEL(a->window_subtitle), "daemon not running");
+        }
         return;
     }
     a->state = st;
 
     bool connected = st.value("connected", false);
-    set_pill(a->status_pill, connected, connected ? "connected" : "no device");
-    std::string subtitle = "Profile " + st.value("profile", std::string("-")) +
-                           "  |  mode " + std::to_string(st.value("mode", 1));
-    if (st.value("shift", false)) subtitle += " + shift";
-    if (!st["last_error"].get<std::string>().empty()) {
-        subtitle += "  |  " + st["last_error"].get<std::string>();
+    if (!connected) set_pill(a->pill, "pill-bad", "no device");
+    else if (st.value("grabbed", false)) set_pill(a->pill, "pill-ok", "capturing");
+    else set_pill(a->pill, "pill-warn", "connected");
+
+    if (a->window_subtitle) {
+        std::string sub = st.value("profile", std::string("-"));
+        sub += "  ·  mode " + std::to_string(st.value("mode", 1));
+        if (!st["last_error"].get<std::string>().empty()) sub += "  ·  " + st["last_error"].get<std::string>();
+        gtk_label_set_text(GTK_LABEL(a->window_subtitle), sub.c_str());
     }
-    gtk_label_set_text(GTK_LABEL(a->status_label), subtitle.c_str());
 
     for (int i = 0; i < 3; ++i) {
         std::string line = st["mfd"][i].get<std::string>();
         if (line.size() < 16) line.append(16 - line.size(), ' ');
         gtk_label_set_text(GTK_LABEL(a->mfd_lines[i]), line.c_str());
-    }
-
-    for (std::size_t i = 0; i < kAxisCount; ++i) {
-        double v = st["axes"][std::string(axis_name(static_cast<Axis>(i)))].get<double>();
-        if (a->axis_bars[i]) gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(a->axis_bars[i]), v);
-        if (a->axis_labels[i]) {
-            char buf[16];
-            std::snprintf(buf, sizeof(buf), "%3d%%", static_cast<int>(v * 100));
-            gtk_label_set_text(GTK_LABEL(a->axis_labels[i]), buf);
-        }
     }
 
     int mode = st.value("mode", 1);
@@ -222,12 +377,50 @@ void update_state(App* a) {
         else gtk_widget_remove_css_class(a->mode_buttons[i], "suggested-action");
     }
 
+    for (std::size_t i = 0; i < kAxisCount; ++i) {
+        double v = st["axes"][std::string(axis_name(static_cast<Axis>(i)))].get<double>();
+        if (a->axis_bars[i]) gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(a->axis_bars[i]), v);
+        if (a->axis_values[i]) {
+            char buf[16];
+            std::snprintf(buf, sizeof(buf), "%3d%%", static_cast<int>(v * 100));
+            gtk_label_set_text(GTK_LABEL(a->axis_values[i]), buf);
+        }
+    }
+
+    a->stick_x = st["axes"]["x"].get<double>();
+    a->stick_y = st["axes"]["y"].get<double>();
+    a->throttle = st["axes"]["throttle"].get<double>();
+    if (a->stick_area) gtk_widget_queue_draw(a->stick_area);
+    if (a->throttle_area) gtk_widget_queue_draw(a->throttle_area);
+
+    std::vector<int> pressed;
+    for (const auto& b : st["buttons"]) pressed.push_back(b.get<int>());
+    for (int i = 0; i < static_cast<int>(kButtonCount); ++i) {
+        GtkWidget* w = a->button_pills[i];
+        if (!w) continue;
+        bool on = false;
+        for (int p : pressed) on = on || (p == i);
+        if (on) gtk_widget_add_css_class(w, "on");
+        else gtk_widget_remove_css_class(w, "on");
+    }
+
+    for (int i = 0; i < static_cast<int>(Led::Count); ++i) {
+        if (!a->led_dots[i]) continue;
+        std::string color =
+            st["leds"].value(std::string(led_name(static_cast<Led>(i))), std::string("off"));
+        for (const char* c : {"led-off", "led-red", "led-amber", "led-green"}) {
+            gtk_widget_remove_css_class(a->led_dots[i], c);
+        }
+        char css[32];
+        std::snprintf(css, sizeof(css), "led-%s", color.c_str());
+        gtk_widget_add_css_class(a->led_dots[i], css);
+    }
+
     if (a->stopwatch_label) {
         long ms = st["stopwatch"].value("elapsed_ms", 0L);
         char buf[64];
-        std::snprintf(buf, sizeof(buf), "%02ld:%02ld.%02ld  (%s)", ms / 60000,
-                      (ms / 1000) % 60, (ms % 1000) / 10,
-                      st["stopwatch"].value("running", false) ? "running" : "stopped");
+        std::snprintf(buf, sizeof(buf), "%02ld:%02ld.%02ld  %s", ms / 60000, (ms / 1000) % 60,
+                      (ms % 1000) / 10, st["stopwatch"].value("running", false) ? "running" : "stopped");
         gtk_label_set_text(GTK_LABEL(a->stopwatch_label), buf);
     }
 
@@ -239,6 +432,19 @@ void update_state(App* a) {
         }
         a->suppress = false;
     }
+
+    if (a->drift_detail && st.contains("drift") && st["drift"].value("samples", 0) > 0) {
+        std::string text;
+        for (const char* id : {"x", "y", "twist"}) {
+            const json& d = st["drift"]["axes"][id];
+            char buf[128];
+            std::snprintf(buf, sizeof(buf), "%-6s rest %+6.1f%%   jitter %5.1f%%   samples %d\n", id,
+                          d.value("offset", 0.0) * 100.0, d.value("jitter", 0.0) * 100.0,
+                          st["drift"].value("samples", 0));
+            text += buf;
+        }
+        gtk_label_set_text(GTK_LABEL(a->drift_detail), text.c_str());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -248,7 +454,7 @@ void on_mode_clicked(GtkButton* b, gpointer data) {
     App* a = static_cast<App*>(data);
     int mode = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(b), "mode"));
     json r = call(a, "set_mode", {{"mode", mode}});
-    if (r.contains("__error")) toast_error(a, r["__error"].get<std::string>());
+    if (r.contains("__error")) toast(a, r["__error"].get<std::string>());
 }
 
 void on_page_changed(GObject* obj, GParamSpec*, gpointer data) {
@@ -262,11 +468,10 @@ void on_page_changed(GObject* obj, GParamSpec*, gpointer data) {
 void on_text_apply(GtkButton*, gpointer data) {
     App* a = static_cast<App*>(data);
     json lines = json::array();
-    for (auto* e : a->text_entries) {
-        lines.push_back(gtk_editable_get_text(GTK_EDITABLE(e)));
-    }
+    for (auto* e : a->text_entries) lines.push_back(gtk_editable_get_text(GTK_EDITABLE(e)));
     json r = call(a, "set_text", {{"lines", lines}});
-    if (r.contains("__error")) toast_error(a, r["__error"].get<std::string>());
+    if (r.contains("__error")) toast(a, r["__error"].get<std::string>());
+    else toast(a, "Display updated");
 }
 
 void on_bright_changed(GtkRange* range, gpointer data) {
@@ -283,7 +488,7 @@ void on_led_preset(GtkButton* b, gpointer data) {
     App* a = static_cast<App*>(data);
     const char* color = static_cast<const char*>(g_object_get_data(G_OBJECT(b), "color"));
     json r = call(a, "set_led", {{"led", "all"}, {"color", color}});
-    if (r.contains("__error")) toast_error(a, r["__error"].get<std::string>());
+    if (r.contains("__error")) toast(a, r["__error"].get<std::string>());
 }
 
 void on_led_color(GtkButton* b, gpointer data) {
@@ -291,14 +496,14 @@ void on_led_color(GtkButton* b, gpointer data) {
     const char* led = static_cast<const char*>(g_object_get_data(G_OBJECT(b), "led"));
     const char* color = static_cast<const char*>(g_object_get_data(G_OBJECT(b), "color"));
     json r = call(a, "set_led", {{"led", led}, {"color", color}, {"persist", true}});
-    if (r.contains("__error")) toast_error(a, r["__error"].get<std::string>());
+    if (r.contains("__error")) toast(a, r["__error"].get<std::string>());
     refresh_profile(a);
 }
 
 void on_clock_settings(GObject*, GParamSpec*, gpointer data) {
     App* a = static_cast<App*>(data);
     json args;
-    args["h24"] = gtk_switch_get_active(GTK_SWITCH(a->clock24));
+    args["h24"] = gtk_switch_get_active(GTK_SWITCH(a->clock24)) != FALSE;
     args["clock2_offset"] = static_cast<int>(gtk_spin_button_get_value(GTK_SPIN_BUTTON(a->offs2)));
     args["clock3_offset"] = static_cast<int>(gtk_spin_button_get_value(GTK_SPIN_BUTTON(a->offs3)));
     call(a, "set_clock", args);
@@ -307,7 +512,7 @@ void on_clock_settings(GObject*, GParamSpec*, gpointer data) {
 void on_clock_now(GtkButton*, gpointer data) {
     App* a = static_cast<App*>(data);
     call(a, "clock_now");
-    toast_error(a, "Clock synchronised from the system");
+    toast(a, "Clock synchronised");
 }
 
 void on_stopwatch(GtkButton* b, gpointer data) {
@@ -318,13 +523,11 @@ void on_stopwatch(GtkButton* b, gpointer data) {
 
 void on_shift_toggled(GObject* obj, GParamSpec*, gpointer data) {
     App* a = static_cast<App*>(data);
-    call(a, "set_shift", {{"on", gtk_switch_get_active(GTK_SWITCH(obj))}});
+    call(a, "set_shift", {{"on", gtk_switch_get_active(GTK_SWITCH(obj)) != FALSE}});
 }
 
-// ---------------------------------------------------------------------------
-// buttons page
-// ---------------------------------------------------------------------------
-std::string action_to_arg(const json& a) {
+// --- bindings ---------------------------------------------------------------
+std::string action_arg(const json& a) {
     std::string type = a.value("action", std::string("passthrough"));
     if (type == "key") return a.value("key", std::string());
     if (type == "exec") return a.value("command", std::string());
@@ -344,7 +547,7 @@ std::string action_to_arg(const json& a) {
     return {};
 }
 
-int action_type_index(const json& a) {
+int action_index(const json& a) {
     std::string type = a.value("action", std::string("passthrough"));
     for (int i = 0; kActionIds[i]; ++i) {
         if (type == kActionIds[i]) return i;
@@ -352,46 +555,88 @@ int action_type_index(const json& a) {
     return 0;
 }
 
-GtkWidget* make_button_row(App* a, int index, bool shift_layer);
-
-void rebuild_button_rows(App* a);
-
-void on_layer_changed(GObject*, GParamSpec*, gpointer data) {
-    App* a = static_cast<App*>(data);
-    rebuild_button_rows(a);
-}
-
-void on_apply_buttons(GtkButton*, gpointer data) {
-    App* a = static_cast<App*>(data);
+GtkWidget* make_binding_row(App* a, int index, bool shift_layer) {
     int mode = gtk_drop_down_get_selected(GTK_DROP_DOWN(a->layer_mode_drop)) + 1;
-    bool shift = gtk_switch_get_active(GTK_SWITCH(a->shift_switch));
-    std::string key = shift ? "shift_buttons" : "buttons";
-    std::string mode_key = std::to_string(mode);
+    std::string mkey = std::to_string(mode);
+    std::string layer = shift_layer ? "shift_buttons" : "buttons";
 
-    if (a->profile.is_null() || !a->profile.contains("modes")) {
-        toast_error(a, "Profile not loaded");
-        return;
+    json action = json{{"action", "passthrough"}};
+    if (a->profile.contains("modes") && a->profile["modes"].contains(mkey) &&
+        a->profile["modes"][mkey].contains(layer) &&
+        a->profile["modes"][mkey][layer].contains(std::to_string(index))) {
+        action = a->profile["modes"][mkey][layer][std::to_string(index)];
     }
 
-    json& layer = a->profile["modes"][mode_key];
+    GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_widget_add_css_class(box, "row");
+
+    GtkWidget* label = gtk_label_new(button_name(static_cast<Button>(index)).data());
+    gtk_widget_set_size_request(label, 132, -1);
+    gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
+    gtk_widget_add_css_class(label, "row-title");
+    gtk_box_append(GTK_BOX(box), label);
+
+    GtkWidget* drop = gtk_drop_down_new_from_strings(kActionNames);
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(drop), action_index(action));
+    gtk_widget_set_size_request(drop, 158, -1);
+    gtk_box_append(GTK_BOX(box), drop);
+
+    GtkWidget* entry = gtk_entry_new();
+    gtk_editable_set_text(GTK_EDITABLE(entry), action_arg(action).c_str());
+    gtk_entry_set_placeholder_text(GTK_ENTRY(entry), "key · command · page · macro steps");
+    gtk_widget_set_hexpand(entry, TRUE);
+    gtk_box_append(GTK_BOX(box), entry);
+
+    a->btn_action[index] = drop;
+    a->btn_arg[index] = entry;
+    return box;
+}
+
+void rebuild_bindings(App* a) {
+    if (!a->buttons_box) return;
+    GtkWidget* child = gtk_widget_get_first_child(a->buttons_box);
+    while (child) {
+        GtkWidget* next = gtk_widget_get_next_sibling(child);
+        gtk_box_remove(GTK_BOX(a->buttons_box), child);
+        child = next;
+    }
+    bool shift = gtk_switch_get_active(GTK_SWITCH(a->shift_switch)) != FALSE;
+    for (int i = 0; i < static_cast<int>(kButtonCount); ++i) {
+        gtk_box_append(GTK_BOX(a->buttons_box), make_binding_row(a, i, shift));
+    }
+}
+
+void on_layer_changed(GObject*, GParamSpec*, gpointer data) {
+    rebuild_bindings(static_cast<App*>(data));
+}
+
+void on_apply_bindings(GtkButton*, gpointer data) {
+    App* a = static_cast<App*>(data);
+    int mode = gtk_drop_down_get_selected(GTK_DROP_DOWN(a->layer_mode_drop)) + 1;
+    bool shift = gtk_switch_get_active(GTK_SWITCH(a->shift_switch)) != FALSE;
+    std::string key = shift ? "shift_buttons" : "buttons";
+    std::string mkey = std::to_string(mode);
+
+    if (!a->profile.contains("modes")) {
+        toast(a, "Profile not loaded");
+        return;
+    }
+    json& layer = a->profile["modes"][mkey];
     if (!layer.is_object()) layer = json::object();
     if (!layer.contains(key) || !layer[key].is_object()) layer[key] = json::object();
 
     for (int i = 0; i < static_cast<int>(kButtonCount); ++i) {
-        GtkWidget* drop = a->button_action[i];
-        GtkWidget* entry = a->button_arg[i];
-        if (!drop) continue;
-        guint sel = gtk_drop_down_get_selected(GTK_DROP_DOWN(drop));
+        if (!a->btn_action[i]) continue;
+        guint sel = gtk_drop_down_get_selected(GTK_DROP_DOWN(a->btn_action[i]));
         std::string type = kActionIds[sel];
-        std::string arg = gtk_editable_get_text(GTK_EDITABLE(entry));
+        std::string arg = gtk_editable_get_text(GTK_EDITABLE(a->btn_arg[i]));
         std::string bkey = std::to_string(i);
 
-        json action;
         if (type == "passthrough") {
             layer[key].erase(bkey);
             continue;
         }
-        action["action"] = type;
+        json action{{"action", type}};
         if (type == "key") action["key"] = arg;
         else if (type == "exec") action["command"] = arg;
         else if (type == "mode") action["mode"] = std::atoi(arg.c_str());
@@ -418,73 +663,150 @@ void on_apply_buttons(GtkButton*, gpointer data) {
 
     json r = call(a, "profile", {{"action", "set"}, {"profile", a->profile}});
     if (r.contains("__error")) {
-        toast_error(a, r["__error"].get<std::string>());
+        toast(a, r["__error"].get<std::string>());
         return;
     }
     refresh_profile(a);
-    toast_error(a, "Bindings applied");
+    toast(a, "Bindings applied");
 }
 
-GtkWidget* make_button_row(App* a, int index, bool shift_layer) {
-    int mode = gtk_drop_down_get_selected(GTK_DROP_DOWN(a->layer_mode_drop)) + 1;
-    std::string mkey = std::to_string(mode);
-    std::string layer_key = shift_layer ? "shift_buttons" : "buttons";
+// --- diagnostics ------------------------------------------------------------
+gboolean on_drift_finished(gpointer data);
 
-    json action = json{{"action", "passthrough"}};
-    if (a->profile.contains("modes") && a->profile["modes"].contains(mkey) &&
-        a->profile["modes"][mkey].contains(layer_key) &&
-        a->profile["modes"][mkey][layer_key].contains(std::to_string(index))) {
-        action = a->profile["modes"][mkey][layer_key][std::to_string(index)];
+void on_drift_start(GtkButton* b, gpointer data) {
+    App* a = static_cast<App*>(data);
+    json r = call(a, "drift", {{"op", "start"}});
+    if (r.contains("__error")) {
+        toast(a, r["__error"].get<std::string>());
+        return;
     }
-
-    GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    gtk_widget_set_margin_top(box, 2);
-    gtk_widget_set_margin_bottom(box, 2);
-
-    GtkWidget* label = gtk_label_new(button_name(static_cast<Button>(index)).data());
-    gtk_widget_set_size_request(label, 130, -1);
-    gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
-    gtk_box_append(GTK_BOX(box), label);
-
-    GtkWidget* drop = gtk_drop_down_new_from_strings(kActionNames);
-    gtk_drop_down_set_selected(GTK_DROP_DOWN(drop), action_type_index(action));
-    gtk_widget_set_size_request(drop, 150, -1);
-    gtk_box_append(GTK_BOX(box), drop);
-
-    GtkWidget* entry = gtk_entry_new();
-    gtk_editable_set_text(GTK_EDITABLE(entry), action_to_arg(action).c_str());
-    gtk_widget_set_hexpand(entry, TRUE);
-    gtk_entry_set_placeholder_text(GTK_ENTRY(entry), "key / command / page / macro steps");
-    gtk_box_append(GTK_BOX(box), entry);
-
-    a->button_action[index] = drop;
-    a->button_arg[index] = entry;
-    return box;
+    gtk_widget_set_sensitive(GTK_WIDGET(b), FALSE);
+    gtk_label_set_text(GTK_LABEL(a->drift_detail), "Measuring… keep the stick still for 5 seconds.");
+    g_timeout_add(5000, on_drift_finished, a);
 }
 
-void rebuild_button_rows(App* a) {
-    if (!a->profile_list) return;
-    GtkWidget* container = a->buttons_box;
-    if (!container) return;
-    GtkWidget* child = gtk_widget_get_first_child(container);
+gboolean on_drift_finished(gpointer data) {
+    App* a = static_cast<App*>(data);
+    call(a, "drift", {{"op", "stop"}});
+    if (a->drift_button) gtk_widget_set_sensitive(a->drift_button, TRUE);
+    update_state(a);
+    return G_SOURCE_REMOVE;
+}
+
+void on_drift_apply(GtkButton*, gpointer data) {
+    App* a = static_cast<App*>(data);
+    const json& axes = a->state["drift"]["axes"];
+    int applied = 0;
+    for (const char* id : {"x", "y", "twist"}) {
+        double offset = axes[id].value("offset", 0.0);
+        if (std::fabs(offset) < 0.01) continue;
+        json r = call(a, "apply_axis", {{"axis", id}, {"center", offset}});
+        if (!r.contains("__error")) ++applied;
+    }
+    if (applied == 0) {
+        toast(a, "No drift to correct");
+        return;
+    }
+    refresh_profile(a);
+    char msg[64];
+    std::snprintf(msg, sizeof(msg), "Centre correction applied to %d axis(es)", applied);
+    toast(a, msg);
+}
+
+void rebuild_checks(App* a, const json& diag) {
+    if (!a->checks_box) return;
+    GtkWidget* child = gtk_widget_get_first_child(a->checks_box);
     while (child) {
         GtkWidget* next = gtk_widget_get_next_sibling(child);
-        gtk_box_remove(GTK_BOX(container), child);
+        gtk_box_remove(GTK_BOX(a->checks_box), child);
         child = next;
     }
-    bool shift = gtk_switch_get_active(GTK_SWITCH(a->shift_switch));
-    for (int i = 0; i < static_cast<int>(kButtonCount); ++i) {
-        gtk_box_append(GTK_BOX(container), make_button_row(a, i, shift));
+    int fails = 0, warns = 0;
+    if (!diag.contains("checks")) return;
+    for (const auto& c : diag["checks"]) {
+        std::string level = c.value("level", std::string("ok"));
+        if (level == "fail") ++fails;
+        else if (level == "warn") ++warns;
+
+        GtkWidget* r = row(c.value("name", std::string("?")).c_str(),
+                           c.value("detail", std::string()).c_str(), nullptr);
+        GtkWidget* pill = gtk_label_new(level.c_str());
+        gtk_widget_add_css_class(pill, "pill");
+        gtk_widget_add_css_class(pill, level == "fail" ? "pill-bad"
+                                                       : (level == "warn" ? "pill-warn" : "pill-ok"));
+        gtk_widget_set_valign(pill, GTK_ALIGN_CENTER);
+        gtk_box_append(GTK_BOX(r), pill);
+        gtk_box_append(GTK_BOX(a->checks_box), r);
+        GtkWidget* sep = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+        gtk_widget_add_css_class(sep, "sep");
+        gtk_box_append(GTK_BOX(a->checks_box), sep);
+    }
+    if (a->checks_pill) {
+        char buf[64];
+        if (fails) std::snprintf(buf, sizeof(buf), "%d issue(s)", fails);
+        else if (warns) std::snprintf(buf, sizeof(buf), "%d warning(s)", warns);
+        else std::snprintf(buf, sizeof(buf), "all good");
+        set_pill(a->checks_pill, fails ? "pill-bad" : (warns ? "pill-warn" : "pill-ok"), buf);
     }
 }
 
-// ---------------------------------------------------------------------------
-// profiles page
-// ---------------------------------------------------------------------------
-void reload_profile_list(App* a) {
+void on_run_checks(GtkButton*, gpointer data) {
+    App* a = static_cast<App*>(data);
+    json d = call(a, "diagnostics");
+    if (d.contains("__error")) {
+        toast(a, d["__error"].get<std::string>());
+        return;
+    }
+    rebuild_checks(a, d);
+}
+
+void on_feel_axis(GObject* obj, GParamSpec*, gpointer data) {
+    App* a = static_cast<App*>(data);
+    int idx = static_cast<int>(gtk_drop_down_get_selected(GTK_DROP_DOWN(obj)));
+    if (idx < 0 || !kAxisIds[idx]) return;
+    const json& axes = a->profile["axes"];
+    std::string id = kAxisIds[idx];
+    a->suppress = true;
+    if (axes.contains(id)) {
+        gtk_range_set_value(GTK_RANGE(a->feel_deadzone), axes[id].value("deadzone", 0.0));
+        gtk_label_set_text(GTK_LABEL(a->feel_curve),
+                           axes[id].value("curve", 1.0) > 1.05 ? "soft"
+                           : (axes[id].value("curve", 1.0) < 0.95 ? "hard" : "linear"));
+    } else {
+        gtk_range_set_value(GTK_RANGE(a->feel_deadzone), 0.0);
+        gtk_label_set_text(GTK_LABEL(a->feel_curve), "linear");
+    }
+    a->suppress = false;
+}
+
+void on_feel_preset(GtkButton* b, gpointer data) {
+    App* a = static_cast<App*>(data);
+    int idx = static_cast<int>(gtk_drop_down_get_selected(GTK_DROP_DOWN(a->feel_drop)));
+    if (idx < 0 || !kAxisIds[idx]) return;
+    double curve = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(b), "curve")) / 100.0;
+    json r = call(a, "apply_axis", {{"axis", kAxisIds[idx]}, {"curve", curve}});
+    if (r.contains("__error")) {
+        toast(a, r["__error"].get<std::string>());
+        return;
+    }
+    refresh_profile(a);
+    gtk_label_set_text(GTK_LABEL(a->feel_curve),
+                       curve > 1.05 ? "soft" : (curve < 0.95 ? "hard" : "linear"));
+    toast(a, "Axis response updated");
+}
+
+void on_feel_deadzone(GtkRange* range, gpointer data) {
+    App* a = static_cast<App*>(data);
+    if (a->suppress) return;
+    int idx = static_cast<int>(gtk_drop_down_get_selected(GTK_DROP_DOWN(a->feel_drop)));
+    if (idx < 0 || !kAxisIds[idx]) return;
+    call(a, "apply_axis", {{"axis", kAxisIds[idx]}, {"deadzone", gtk_range_get_value(range)}});
+}
+
+// --- profiles ---------------------------------------------------------------
+void reload_profiles(App* a) {
     json r = call(a, "profile", {{"action", "list"}});
-    if (r.contains("__error")) return;
-    if (!a->profile_list) return;
+    if (r.contains("__error") || !a->profile_list) return;
     GtkWidget* child = gtk_widget_get_first_child(a->profile_list);
     while (child) {
         GtkWidget* next = gtk_widget_get_next_sibling(child);
@@ -494,284 +816,306 @@ void reload_profile_list(App* a) {
     std::string current = r.value("current", std::string());
     for (const auto& p : r["profiles"]) {
         std::string name = p.get<std::string>();
-        GtkWidget* row = gtk_list_box_row_new();
-        GtkWidget* lbl = gtk_label_new((name == current ? "\u25cf  " + name : "     " + name).c_str());
+        GtkWidget* lr = gtk_list_box_row_new();
+        GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+        gtk_widget_set_margin_top(box, 8);
+        gtk_widget_set_margin_bottom(box, 8);
+        gtk_widget_set_margin_start(box, 12);
+        gtk_widget_set_margin_end(box, 12);
+        GtkWidget* lbl = gtk_label_new(name.c_str());
         gtk_label_set_xalign(GTK_LABEL(lbl), 0.0f);
-        gtk_widget_set_margin_top(lbl, 6);
-        gtk_widget_set_margin_bottom(lbl, 6);
-        gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), lbl);
-        g_object_set_data_full(G_OBJECT(row), "name", g_strdup(name.c_str()), g_free);
-        gtk_list_box_append(GTK_LIST_BOX(a->profile_list), row);
+        gtk_widget_set_hexpand(lbl, TRUE);
+        gtk_box_append(GTK_BOX(box), lbl);
+        if (name == current) {
+            GtkWidget* tag = gtk_label_new("active");
+            set_pill(tag, "pill-ok", "active");
+            gtk_box_append(GTK_BOX(box), tag);
+        }
+        gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(lr), box);
+        g_object_set_data_full(G_OBJECT(lr), "name", g_strdup(name.c_str()), g_free);
+        gtk_list_box_append(GTK_LIST_BOX(a->profile_list), lr);
     }
 }
 
-void on_profile_activated(GtkListBox*, GtkListBoxRow* row, gpointer data) {
+void on_profile_activated(GtkListBox*, GtkListBoxRow* lr, gpointer data) {
     App* a = static_cast<App*>(data);
-    if (!row) return;
-    const char* name = static_cast<const char*>(g_object_get_data(G_OBJECT(row), "name"));
+    if (!lr) return;
+    const char* name = static_cast<const char*>(g_object_get_data(G_OBJECT(lr), "name"));
     if (!name) return;
     json r = call(a, "profile", {{"action", "load"}, {"name", name}});
     if (r.contains("__error")) {
-        toast_error(a, r["__error"].get<std::string>());
+        toast(a, r["__error"].get<std::string>());
         return;
     }
     refresh_profile(a);
-    reload_profile_list(a);
-    toast_error(a, (std::string("Loaded ") + name).c_str());
+    reload_profiles(a);
+    toast(a, std::string("Loaded ") + name);
 }
 
 void on_profile_save(GtkButton*, gpointer data) {
     App* a = static_cast<App*>(data);
-    const char* name = gtk_editable_get_text(GTK_EDITABLE(a->profile_name_entry));
+    const char* name = gtk_editable_get_text(GTK_EDITABLE(a->profile_name));
     if (!name || !*name) {
-        toast_error(a, "Enter a profile name first");
+        toast(a, "Enter a profile name");
         return;
     }
     json r = call(a, "profile", {{"action", "save"}, {"name", name}});
     if (r.contains("__error")) {
-        toast_error(a, r["__error"].get<std::string>());
+        toast(a, r["__error"].get<std::string>());
         return;
     }
-    reload_profile_list(a);
-    toast_error(a, (std::string("Saved ") + name).c_str());
+    reload_profiles(a);
+    toast(a, std::string("Saved ") + name);
 }
 
 void on_profile_new(GtkButton*, gpointer data) {
     App* a = static_cast<App*>(data);
-    const char* name = gtk_editable_get_text(GTK_EDITABLE(a->profile_name_entry));
+    const char* name = gtk_editable_get_text(GTK_EDITABLE(a->profile_name));
     if (!name || !*name) {
-        toast_error(a, "Enter a name for the new profile");
+        toast(a, "Enter a name first");
         return;
     }
     json r = call(a, "profile", {{"action", "create"}, {"name", name}});
     if (r.contains("__error")) {
-        toast_error(a, r["__error"].get<std::string>());
+        toast(a, r["__error"].get<std::string>());
         return;
     }
     call(a, "profile", {{"action", "save"}, {"name", name}});
     refresh_profile(a);
-    reload_profile_list(a);
-    toast_error(a, "New profile created");
+    reload_profiles(a);
+    toast(a, "New profile created");
 }
 
 void on_profile_delete(GtkButton*, gpointer data) {
     App* a = static_cast<App*>(data);
-    const char* name = gtk_editable_get_text(GTK_EDITABLE(a->profile_name_entry));
+    const char* name = gtk_editable_get_text(GTK_EDITABLE(a->profile_name));
     if (!name || !*name) return;
     json r = call(a, "profile", {{"action", "delete"}, {"name", name}});
     if (r.contains("__error")) {
-        toast_error(a, r["__error"].get<std::string>());
+        toast(a, r["__error"].get<std::string>());
         return;
     }
-    reload_profile_list(a);
-    toast_error(a, "Profile deleted");
+    reload_profiles(a);
+    toast(a, "Profile deleted");
+}
+
+void refresh_profile(App* a) {
+    json r = call(a, "profile", {{"action", "get"}});
+    if (r.contains("__error") || !r.contains("profile")) return;
+    a->profile = r["profile"];
+    const json& s = a->profile["settings"];
+
+    if (s.contains("custom_text") && s["custom_text"].is_array()) {
+        for (int i = 0; i < 3; ++i) {
+            if (!a->text_entries[i] || i >= static_cast<int>(s["custom_text"].size())) continue;
+            gtk_editable_set_text(GTK_EDITABLE(a->text_entries[i]),
+                                  s["custom_text"][i].get<std::string>().c_str());
+        }
+    }
+    if (a->mfd_bright && s.contains("mfd_brightness")) {
+        g_signal_handlers_block_by_func(a->mfd_bright, (gpointer)on_bright_changed, a);
+        gtk_range_set_value(GTK_RANGE(a->mfd_bright), s["mfd_brightness"].get<int>());
+        g_signal_handlers_unblock_by_func(a->mfd_bright, (gpointer)on_bright_changed, a);
+    }
+    if (a->led_bright && s.contains("led_brightness")) {
+        g_signal_handlers_block_by_func(a->led_bright, (gpointer)on_led_bright_changed, a);
+        gtk_range_set_value(GTK_RANGE(a->led_bright), s["led_brightness"].get<int>());
+        g_signal_handlers_unblock_by_func(a->led_bright, (gpointer)on_led_bright_changed, a);
+    }
+    if (a->clock24 && s.contains("clock_24h")) {
+        gtk_switch_set_active(GTK_SWITCH(a->clock24), s["clock_24h"].get<bool>());
+    }
+    if (a->offs2 && s.contains("clock2_offset")) {
+        gtk_spin_button_set_value(GTK_SPIN_BUTTON(a->offs2), s["clock2_offset"].get<int>());
+    }
+    if (a->offs3 && s.contains("clock3_offset")) {
+        gtk_spin_button_set_value(GTK_SPIN_BUTTON(a->offs3), s["clock3_offset"].get<int>());
+    }
 }
 
 // ---------------------------------------------------------------------------
-// page construction
+// pages
 // ---------------------------------------------------------------------------
 GtkWidget* build_overview(App* a) {
-    AdwPreferencesPage* page = ADW_PREFERENCES_PAGE(adw_preferences_page_new());
+    GtkWidget* body = nullptr;
+    GtkWidget* page = page_root("Overview", "Live state of the throttle and stick.", &body);
 
-    AdwPreferencesGroup* device = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
-    adw_preferences_group_set_title(device, "Device");
-    GtkWidget* status_row = row("Logitech X52 Pro HOTAS", "Enumerating...");
-    a->status_label = gtk_label_new("");
-    gtk_widget_add_css_class(a->status_label, "dim");
-    adw_action_row_add_suffix(ADW_ACTION_ROW(status_row), a->status_label);
-    a->status_pill = gtk_label_new("offline");
-    set_pill(a->status_pill, false, "offline");
-    adw_action_row_add_suffix(ADW_ACTION_ROW(status_row), a->status_pill);
-    adw_preferences_group_add(device, status_row);
-    adw_preferences_page_add(page, device);
+    GtkWidget* card_device = card("DEVICE", nullptr);
+    GtkWidget* status_row = row("Logitech X52 Pro H.O.T.A.S.",
+                                "vendor channel 0x91 · 3x16 MFD · 11 LEDs", nullptr);
+    a->pill = gtk_label_new("…");
+    set_pill(a->pill, "pill-warn", "connecting");
+    gtk_widget_set_valign(a->pill, GTK_ALIGN_CENTER);
+    gtk_box_append(GTK_BOX(status_row), a->pill);
+    add_row(card_device, status_row);
+    gtk_box_append(GTK_BOX(body), card_device);
 
-    AdwPreferencesGroup* display = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
-    adw_preferences_group_set_title(display, "Throttle display");
-    adw_preferences_group_set_description(display, "Live copy of the MFD");
-    adw_preferences_group_add(display, lcd_box(a));
-    adw_preferences_page_add(page, display);
+    GtkWidget* card_mfd = card("THROTTLE DISPLAY", nullptr);
+    GtkWidget* lcd_wrap = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_set_margin_top(lcd_wrap, 8);
+    gtk_widget_set_margin_bottom(lcd_wrap, 14);
+    gtk_widget_set_margin_start(lcd_wrap, 18);
+    gtk_widget_set_margin_end(lcd_wrap, 18);
+    gtk_box_append(GTK_BOX(lcd_wrap), lcd_widget(a));
+    gtk_box_append(GTK_BOX(card_mfd), lcd_wrap);
+    gtk_box_append(GTK_BOX(body), card_mfd);
 
-    AdwPreferencesGroup* mode_group = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
-    adw_preferences_group_set_title(mode_group, "Mode");
-    GtkWidget* mode_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    gtk_widget_set_margin_top(mode_box, 8);
-    gtk_widget_set_margin_bottom(mode_box, 8);
+    GtkWidget* card_mode = card("MODE", "The hardware switch follows this selection.");
+    GtkWidget* seg = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_add_css_class(seg, "linked");
     for (int i = 0; i < 3; ++i) {
         char label[16];
         std::snprintf(label, sizeof(label), "Mode %d", i + 1);
         GtkWidget* b = gtk_button_new_with_label(label);
         g_object_set_data(G_OBJECT(b), "mode", GINT_TO_POINTER(i + 1));
         g_signal_connect(b, "clicked", G_CALLBACK(on_mode_clicked), a);
-        gtk_box_append(GTK_BOX(mode_box), b);
+        gtk_box_append(GTK_BOX(seg), b);
         a->mode_buttons[i] = b;
     }
+    add_row(card_mode, row("Active mode", nullptr, seg));
 
     GtkWidget* page_drop = gtk_drop_down_new_from_strings(kPageNames);
-    gtk_widget_set_size_request(page_drop, 160, -1);
-    gtk_widget_set_hexpand(page_drop, TRUE);
+    gtk_widget_set_size_request(page_drop, 170, -1);
     g_signal_connect(page_drop, "notify::selected", G_CALLBACK(on_page_changed), a);
     a->page_drop = page_drop;
+    add_row(card_mode, row("MFD page", "What the display is showing", page_drop));
+    gtk_box_append(GTK_BOX(body), card_mode);
 
-    GtkWidget* mode_row = row("Active mode", "LED theme follows the mode selector");
-    adw_action_row_add_suffix(ADW_ACTION_ROW(mode_row), mode_box);
-    adw_preferences_group_add(mode_group, mode_row);
-
-    GtkWidget* page_row = row("Display page", "What the MFD is showing right now");
-    adw_action_row_add_suffix(ADW_ACTION_ROW(page_row), page_drop);
-    adw_preferences_group_add(mode_group, page_row);
-    adw_preferences_page_add(page, mode_group);
-
-    AdwPreferencesGroup* axes = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
-    adw_preferences_group_set_title(axes, "Axes");
+    GtkWidget* card_axes = card("AXES", nullptr);
     for (std::size_t i = 0; i < kAxisCount; ++i) {
-        GtkWidget* r = row(std::string(axis_name(static_cast<Axis>(i))).c_str(), nullptr);
         GtkWidget* bar = gtk_progress_bar_new();
-        gtk_widget_set_size_request(bar, 260, -1);
+        gtk_widget_set_size_request(bar, 220, -1);
         gtk_progress_bar_set_show_text(GTK_PROGRESS_BAR(bar), FALSE);
         a->axis_bars[i] = bar;
-        GtkWidget* value = gtk_label_new("  0%");
-        a->axis_labels[i] = value;
-        gtk_widget_add_css_class(value, "dim");
-        adw_action_row_add_suffix(ADW_ACTION_ROW(r), bar);
-        adw_action_row_add_suffix(ADW_ACTION_ROW(r), value);
-        adw_preferences_group_add(axes, r);
+        GtkWidget* val = gtk_label_new("  0%");
+        gtk_widget_add_css_class(val, "mono");
+        a->axis_values[i] = val;
+        GtkWidget* ctl = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+        gtk_box_append(GTK_BOX(ctl), bar);
+        gtk_box_append(GTK_BOX(ctl), val);
+        add_row(card_axes, row(std::string(axis_name(static_cast<Axis>(i))).c_str(), nullptr, ctl));
     }
-    adw_preferences_page_add(page, axes);
-
-    return GTK_WIDGET(page);
+    gtk_box_append(GTK_BOX(body), card_axes);
+    return page;
 }
 
 GtkWidget* build_display(App* a) {
-    AdwPreferencesPage* page = ADW_PREFERENCES_PAGE(adw_preferences_page_new());
+    GtkWidget* body = nullptr;
+    GtkWidget* page = page_root("Display",
+                                "Write the three MFD lines, set brightness and program the clock.",
+                                &body);
 
-    AdwPreferencesGroup* text = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
-    adw_preferences_group_set_title(text, "Custom text");
-    adw_preferences_group_set_description(text, "16 characters per line, ASCII");
+    GtkWidget* card_text = card("CUSTOM TEXT", "16 fixed-width characters per line, uppercase");
     for (int i = 0; i < 3; ++i) {
-        char title[32];
-        std::snprintf(title, sizeof(title), "Line %d", i + 1);
-        GtkWidget* r = row(title, nullptr);
         GtkWidget* e = gtk_entry_new();
         gtk_entry_set_max_length(GTK_ENTRY(e), 16);
         gtk_editable_set_width_chars(GTK_EDITABLE(e), 18);
         gtk_entry_set_placeholder_text(GTK_ENTRY(e), "line text");
         a->text_entries[i] = e;
-        adw_action_row_add_suffix(ADW_ACTION_ROW(r), e);
-        adw_preferences_group_add(text, r);
+        char title[16];
+        std::snprintf(title, sizeof(title), "Line %d", i + 1);
+        add_row(card_text, row(title, nullptr, e));
     }
     GtkWidget* apply = gtk_button_new_with_label("Write to display");
     gtk_widget_add_css_class(apply, "suggested-action");
+    gtk_widget_set_halign(apply, GTK_ALIGN_END);
+    gtk_widget_set_margin_top(apply, 10);
+    gtk_widget_set_margin_bottom(apply, 14);
+    gtk_widget_set_margin_end(apply, 18);
     g_signal_connect(apply, "clicked", G_CALLBACK(on_text_apply), a);
-    adw_preferences_group_add(text, apply);
-    adw_preferences_page_add(page, text);
+    gtk_box_append(GTK_BOX(card_text), apply);
+    gtk_box_append(GTK_BOX(body), card_text);
 
-    AdwPreferencesGroup* light = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
-    adw_preferences_group_set_title(light, "Brightness");
-    GtkWidget* mfd_row = row("Display", "0 - 255");
-    GtkWidget* mfd = nullptr;
-    adw_action_row_add_suffix(ADW_ACTION_ROW(mfd_row), slider(0, 255, 180, &mfd));
-    g_signal_connect(mfd, "value-changed", G_CALLBACK(on_bright_changed), a);
-    a->mfd_bright = mfd;
-    adw_preferences_group_add(light, mfd_row);
+    GtkWidget* card_light = card("BRIGHTNESS", nullptr);
+    GtkWidget* mfd_s = nullptr;
+    add_row(card_light, row("Display", "0 – 255", slider(0, 255, 180, &mfd_s)));
+    a->mfd_bright = mfd_s;
+    g_signal_connect(mfd_s, "value-changed", G_CALLBACK(on_bright_changed), a);
+    GtkWidget* led_s = nullptr;
+    add_row(card_light, row("LEDs", "0 – 255", slider(0, 255, 180, &led_s)));
+    a->led_bright = led_s;
+    g_signal_connect(led_s, "value-changed", G_CALLBACK(on_led_bright_changed), a);
+    gtk_box_append(GTK_BOX(body), card_light);
 
-    GtkWidget* led_row = row("LEDs", "0 - 255");
-    GtkWidget* led = nullptr;
-    adw_action_row_add_suffix(ADW_ACTION_ROW(led_row), slider(0, 255, 180, &led));
-    g_signal_connect(led, "value-changed", G_CALLBACK(on_led_bright_changed), a);
-    a->led_bright = led;
-    adw_preferences_group_add(light, led_row);
-    adw_preferences_page_add(page, light);
-
-    AdwPreferencesGroup* clock = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
-    adw_preferences_group_set_title(clock, "Clock");
-    adw_preferences_group_set_description(
-        clock, "The device keeps the time itself; offsets drive clocks 2 and 3");
-
-    GtkWidget* h24_row = row("24 hour format", nullptr);
+    GtkWidget* card_clock = card("CLOCK",
+                                 "The device keeps its own time; clocks 2 and 3 are offsets.");
     GtkWidget* h24 = gtk_switch_new();
     gtk_switch_set_active(GTK_SWITCH(h24), TRUE);
-    adw_action_row_add_suffix(ADW_ACTION_ROW(h24_row), h24);
-    g_signal_connect(h24, "notify::active", G_CALLBACK(on_clock_settings), a);
     a->clock24 = h24;
-    adw_preferences_group_add(clock, h24_row);
+    add_row(card_clock, row("24 hour format", nullptr, h24));
 
-    GtkWidget* o2 = row("Clock 2 offset", "minutes from the base clock");
     GtkWidget* s2 = gtk_spin_button_new_with_range(-1439, 1439, 15);
-    adw_action_row_add_suffix(ADW_ACTION_ROW(o2), s2);
-    g_signal_connect(s2, "value-changed", G_CALLBACK(+[](GtkSpinButton*, gpointer d) { on_clock_settings(nullptr, nullptr, d); }), a);
     a->offs2 = s2;
-    adw_preferences_group_add(clock, o2);
-
-    GtkWidget* o3 = row("Clock 3 offset", "minutes from the base clock");
+    add_row(card_clock, row("Clock 2 offset", "minutes from the base clock", s2));
     GtkWidget* s3 = gtk_spin_button_new_with_range(-1439, 1439, 15);
-    adw_action_row_add_suffix(ADW_ACTION_ROW(o3), s3);
-    g_signal_connect(s3, "value-changed", G_CALLBACK(+[](GtkSpinButton*, gpointer d) { on_clock_settings(nullptr, nullptr, d); }), a);
     a->offs3 = s3;
-    adw_preferences_group_add(clock, o3);
+    add_row(card_clock, row("Clock 3 offset", "minutes from the base clock", s3));
 
-    GtkWidget* sync = gtk_button_new_with_label("Set from system clock");
+    GtkWidget* sync = gtk_button_new_with_label("Set from system");
     g_signal_connect(sync, "clicked", G_CALLBACK(on_clock_now), a);
-    GtkWidget* sync_row = row("Synchronise", "program date and time from this computer");
-    adw_action_row_add_suffix(ADW_ACTION_ROW(sync_row), sync);
-    adw_preferences_group_add(clock, sync_row);
-    adw_preferences_page_add(page, clock);
+    add_row(card_clock, row("Synchronise", "copy date and time from this computer", sync));
+    gtk_box_append(GTK_BOX(body), card_clock);
 
-    AdwPreferencesGroup* sw = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
-    adw_preferences_group_set_title(sw, "Stopwatch");
-    GtkWidget* sw_row = row("Elapsed", "host driven, shown on the MFD page");
-    a->stopwatch_label = gtk_label_new("00:00.00");
-    gtk_widget_add_css_class(a->stopwatch_label, "dim");
-    adw_action_row_add_suffix(ADW_ACTION_ROW(sw_row), a->stopwatch_label);
-    adw_preferences_group_add(sw, sw_row);
+    g_signal_connect(h24, "notify::active", G_CALLBACK(on_clock_settings), a);
+    g_signal_connect(s2, "value-changed", G_CALLBACK(on_clock_settings), a);
+    g_signal_connect(s3, "value-changed", G_CALLBACK(on_clock_settings), a);
 
-    GtkWidget* buttons = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    GtkWidget* card_sw = card("STOPWATCH", nullptr);
+    a->stopwatch_label = gtk_label_new("00:00.00  stopped");
+    gtk_widget_add_css_class(a->stopwatch_label, "mono");
+    add_row(card_sw, row("Elapsed", "shown on the stopwatch page", a->stopwatch_label));
+    GtkWidget* btns = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_add_css_class(btns, "linked");
     const char* ops[] = {"start", "stop", "reset"};
     const char* labels[] = {"Start", "Stop", "Reset"};
     for (int i = 0; i < 3; ++i) {
         GtkWidget* b = gtk_button_new_with_label(labels[i]);
         g_object_set_data(G_OBJECT(b), "op", const_cast<char*>(ops[i]));
         g_signal_connect(b, "clicked", G_CALLBACK(on_stopwatch), a);
-        gtk_box_append(GTK_BOX(buttons), b);
+        gtk_box_append(GTK_BOX(btns), b);
     }
-    GtkWidget* sw_btns = row("Controls", nullptr);
-    adw_action_row_add_suffix(ADW_ACTION_ROW(sw_btns), buttons);
-    adw_preferences_group_add(sw, sw_btns);
-    adw_preferences_page_add(page, sw);
-
-    return GTK_WIDGET(page);
+    add_row(card_sw, row("Controls", nullptr, btns));
+    gtk_box_append(GTK_BOX(body), card_sw);
+    return page;
 }
 
 GtkWidget* build_leds(App* a) {
-    AdwPreferencesPage* page = ADW_PREFERENCES_PAGE(adw_preferences_page_new());
+    GtkWidget* body = nullptr;
+    GtkWidget* page = page_root("LEDs", "Per-mode colours, stored in the active profile.", &body);
 
-    AdwPreferencesGroup* quick = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
-    adw_preferences_group_set_title(quick, "All LEDs");
+    GtkWidget* quick = card("ALL LEDS", nullptr);
     GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-    struct Preset {
-        const char* label;
-        const char* color;
-    };
-    const Preset presets[] = {{"Off", "off"}, {"Red", "red"}, {"Amber", "amber"}, {"Green", "green"}};
-    for (const auto& p : presets) {
-        GtkWidget* b = gtk_button_new_with_label(p.label);
-        g_object_set_data(G_OBJECT(b), "color", const_cast<char*>(p.color));
+    const char* presets[] = {"Off", "Red", "Amber", "Green"};
+    const char* colors[] = {"off", "red", "amber", "green"};
+    for (int i = 0; i < 4; ++i) {
+        GtkWidget* b = gtk_button_new_with_label(presets[i]);
+        g_object_set_data(G_OBJECT(b), "color", const_cast<char*>(colors[i]));
         g_signal_connect(b, "clicked", G_CALLBACK(on_led_preset), a);
         gtk_box_append(GTK_BOX(box), b);
     }
-    GtkWidget* quick_row = row("Preset", nullptr);
-    adw_action_row_add_suffix(ADW_ACTION_ROW(quick_row), box);
-    adw_preferences_group_add(quick, quick_row);
-    adw_preferences_page_add(page, quick);
+    add_row(quick, row("Preset", "applies to every LED", box));
+    gtk_box_append(GTK_BOX(body), quick);
 
-    AdwPreferencesGroup* group = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
-    adw_preferences_group_set_title(group, "Individual LEDs");
-    adw_preferences_group_set_description(group, "Changes are stored in the active mode");
-
+    GtkWidget* group = card("INDIVIDUAL LEDS", nullptr);
     for (std::size_t i = 0; i < static_cast<std::size_t>(Led::Count); ++i) {
         Led led = static_cast<Led>(i);
-        GtkWidget* r = row(std::string(led_name(led)).c_str(), nullptr);
-        GtkWidget* btns = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
-        const char* colors[] = {"off", "red", "amber", "green"};
+        GtkWidget* r = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+        gtk_widget_add_css_class(r, "row");
+
+        GtkWidget* dot = gtk_label_new("");
+        gtk_widget_add_css_class(dot, "led-dot");
+        gtk_widget_add_css_class(dot, "led-off");
+        a->led_dots[i] = dot;
+        gtk_box_append(GTK_BOX(r), dot);
+
+        GtkWidget* name = gtk_label_new(std::string(led_name(led)).c_str());
+        gtk_widget_add_css_class(name, "row-title");
+        gtk_label_set_xalign(GTK_LABEL(name), 0.0f);
+        gtk_widget_set_hexpand(name, TRUE);
+        gtk_box_append(GTK_BOX(r), name);
+
+        GtkWidget* btns = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+        gtk_widget_add_css_class(btns, "linked");
         const char* labels[] = {"Off", "R", "A", "G"};
         for (int c = 0; c < 4; ++c) {
             GtkWidget* b = gtk_button_new_with_label(labels[c]);
@@ -782,83 +1126,227 @@ GtkWidget* build_leds(App* a) {
             g_signal_connect(b, "clicked", G_CALLBACK(on_led_color), a);
             gtk_box_append(GTK_BOX(btns), b);
         }
-        adw_action_row_add_suffix(ADW_ACTION_ROW(r), btns);
-        adw_preferences_group_add(group, r);
+        gtk_box_append(GTK_BOX(r), btns);
+        gtk_box_append(GTK_BOX(group), r);
+        GtkWidget* sep = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+        gtk_widget_add_css_class(sep, "sep");
+        gtk_box_append(GTK_BOX(group), sep);
     }
-    adw_preferences_page_add(page, group);
+    gtk_box_append(GTK_BOX(body), group);
 
-    AdwPreferencesGroup* misc = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
-    adw_preferences_group_set_title(misc, "Indicators");
-    GtkWidget* shift_row = row("Shift indicator", "the dot on the MFD");
+    GtkWidget* ind = card("INDICATORS", nullptr);
     GtkWidget* shift = gtk_switch_new();
     g_signal_connect(shift, "notify::active", G_CALLBACK(on_shift_toggled), a);
-    adw_action_row_add_suffix(ADW_ACTION_ROW(shift_row), shift);
-    adw_preferences_group_add(misc, shift_row);
-    adw_preferences_page_add(page, misc);
-
-    return GTK_WIDGET(page);
+    add_row(ind, row("Shift indicator", "the dot on the MFD", shift));
+    gtk_box_append(GTK_BOX(body), ind);
+    return page;
 }
 
 GtkWidget* build_buttons(App* a) {
-    AdwPreferencesPage* page = ADW_PREFERENCES_PAGE(adw_preferences_page_new());
+    GtkWidget* body = nullptr;
+    GtkWidget* page = page_root("Buttons",
+                                "Every button can send a key, a macro, a mode change or a command.",
+                                &body);
 
-    AdwPreferencesGroup* header = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
-    adw_preferences_group_set_title(header, "Bindings");
-
-    GtkWidget* mode_row = row("Mode", "each mode has its own layer");
-    static const char* kModeNames[] = {"Mode 1", "Mode 2", "Mode 3", nullptr};
-    GtkWidget* mode_drop = gtk_drop_down_new_from_strings(kModeNames);
+    GtkWidget* header = card("LAYER", nullptr);
+    static const char* mode_names[] = {"Mode 1", "Mode 2", "Mode 3", nullptr};
+    GtkWidget* mode_drop = gtk_drop_down_new_from_strings(mode_names);
     gtk_drop_down_set_selected(GTK_DROP_DOWN(mode_drop), 0);
-    g_signal_connect(mode_drop, "notify::selected", G_CALLBACK(on_layer_changed), a);
     a->layer_mode_drop = mode_drop;
-    adw_action_row_add_suffix(ADW_ACTION_ROW(mode_row), mode_drop);
-    adw_preferences_group_add(header, mode_row);
+    add_row(header, row("Mode", "each mode has its own bindings", mode_drop));
 
-    GtkWidget* shift_row = row("Shift layer", "pinky switch held: second set of bindings");
     GtkWidget* shift = gtk_switch_new();
-    g_signal_connect(shift, "notify::active", G_CALLBACK(on_layer_changed), a);
     a->shift_switch = shift;
-    adw_action_row_add_suffix(ADW_ACTION_ROW(shift_row), shift);
-    adw_preferences_group_add(header, shift_row);
+    add_row(header, row("Shift layer", "pinky held: the second set of bindings", shift));
+    gtk_box_append(GTK_BOX(body), header);
 
-    GtkWidget* apply = gtk_button_new_with_label("Apply bindings");
-    gtk_widget_add_css_class(apply, "suggested-action");
-    g_signal_connect(apply, "clicked", G_CALLBACK(on_apply_buttons), a);
-    adw_preferences_group_add(header, apply);
-    adw_preferences_page_add(page, header);
-
-    AdwPreferencesGroup* list_group = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
-    adw_preferences_group_set_title(list_group, "Buttons");
+    GtkWidget* list = card("BINDINGS", "unset shift entries fall back to the base layer");
     GtkWidget* container = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     a->buttons_box = container;
-    adw_preferences_group_add(list_group, container);
-    adw_preferences_page_add(page, list_group);
+    gtk_box_append(GTK_BOX(list), container);
+    GtkWidget* apply = gtk_button_new_with_label("Apply bindings");
+    gtk_widget_add_css_class(apply, "suggested-action");
+    gtk_widget_set_halign(apply, GTK_ALIGN_END);
+    gtk_widget_set_margin_top(apply, 10);
+    gtk_widget_set_margin_bottom(apply, 14);
+    gtk_widget_set_margin_end(apply, 18);
+    g_signal_connect(apply, "clicked", G_CALLBACK(on_apply_bindings), a);
+    gtk_box_append(GTK_BOX(list), apply);
+    gtk_box_append(GTK_BOX(body), list);
 
-    return GTK_WIDGET(page);
+    g_signal_connect(mode_drop, "notify::selected", G_CALLBACK(on_layer_changed), a);
+    g_signal_connect(shift, "notify::active", G_CALLBACK(on_layer_changed), a);
+    return page;
+}
+
+GtkWidget* build_test(App* a) {
+    GtkWidget* body = nullptr;
+    GtkWidget* page = page_root("Test",
+                                "Live input, drift measurement, axis feel and a full diagnosis.",
+                                &body);
+
+    // --- live input ---------------------------------------------------------
+    GtkWidget* live = card("LIVE INPUT", "press anything: the matching cell lights up");
+    GtkWidget* viz = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 22);
+    gtk_widget_set_margin_top(viz, 10);
+    gtk_widget_set_margin_bottom(viz, 12);
+    gtk_widget_set_margin_start(viz, 18);
+    gtk_widget_set_margin_end(viz, 18);
+
+    GtkWidget* stick = gtk_drawing_area_new();
+    gtk_widget_set_size_request(stick, 170, 170);
+    gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(stick), draw_stick, a, nullptr);
+    a->stick_area = stick;
+    gtk_box_append(GTK_BOX(viz), stick);
+
+    GtkWidget* throttle = gtk_drawing_area_new();
+    gtk_widget_set_size_request(throttle, 46, 170);
+    gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(throttle), draw_throttle, a, nullptr);
+    a->throttle_area = throttle;
+    gtk_box_append(GTK_BOX(viz), throttle);
+
+    GtkWidget* meters = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_widget_set_hexpand(meters, TRUE);
+    for (std::size_t i = 0; i < kAxisCount; ++i) {
+        GtkWidget* line = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+        GtkWidget* name = gtk_label_new(kAxisLabels[i]);
+        gtk_label_set_xalign(GTK_LABEL(name), 0.0f);
+        gtk_widget_add_css_class(name, "row-sub");
+        gtk_widget_set_size_request(name, 92, -1);
+        GtkWidget* bar = gtk_progress_bar_new();
+        gtk_widget_set_hexpand(bar, TRUE);
+        a->axis_bars[i] = bar;
+        GtkWidget* val = gtk_label_new("  0%");
+        gtk_widget_add_css_class(val, "mono");
+        gtk_widget_set_size_request(val, 44, -1);
+        a->axis_values[i] = val;
+        gtk_box_append(GTK_BOX(line), name);
+        gtk_box_append(GTK_BOX(line), bar);
+        gtk_box_append(GTK_BOX(line), val);
+        gtk_box_append(GTK_BOX(meters), line);
+    }
+    gtk_box_append(GTK_BOX(viz), meters);
+    gtk_box_append(GTK_BOX(live), viz);
+
+    GtkWidget* grid = gtk_grid_new();
+    gtk_grid_set_row_spacing(GTK_GRID(grid), 5);
+    gtk_grid_set_column_spacing(GTK_GRID(grid), 5);
+    gtk_widget_set_margin_start(grid, 18);
+    gtk_widget_set_margin_end(grid, 18);
+    gtk_widget_set_margin_bottom(grid, 16);
+    for (int i = 0; i < static_cast<int>(kButtonCount); ++i) {
+        std::string label(button_name(static_cast<Button>(i)));
+        GtkWidget* p = gtk_label_new(label.c_str());
+        gtk_widget_add_css_class(p, "key-pill");
+        gtk_label_set_ellipsize(GTK_LABEL(p), PANGO_ELLIPSIZE_END);
+        gtk_widget_set_size_request(p, 104, -1);
+        gtk_grid_attach(GTK_GRID(grid), p, i % 6, i / 6, 1, 1);
+        a->button_pills[i] = p;
+    }
+    gtk_box_append(GTK_BOX(live), grid);
+    gtk_box_append(GTK_BOX(body), live);
+
+    // --- drift --------------------------------------------------------------
+    GtkWidget* drift = card("DRIFT & CALIBRATION",
+                            "measures the rest position of roll, pitch and yaw");
+    GtkWidget* drift_btns = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget* start = gtk_button_new_with_label("Run 5 s test");
+    gtk_widget_add_css_class(start, "suggested-action");
+    g_signal_connect(start, "clicked", G_CALLBACK(on_drift_start), a);
+    a->drift_button = start;
+    GtkWidget* fix = gtk_button_new_with_label("Apply centre correction");
+    g_signal_connect(fix, "clicked", G_CALLBACK(on_drift_apply), a);
+    gtk_box_append(GTK_BOX(drift_btns), start);
+    gtk_box_append(GTK_BOX(drift_btns), fix);
+    add_row(drift, row("Measurement", "leave the stick untouched while it runs", drift_btns));
+
+    a->drift_detail = gtk_label_new("No measurement yet.");
+    gtk_widget_add_css_class(a->drift_detail, "mono");
+    gtk_label_set_xalign(GTK_LABEL(a->drift_detail), 0.0f);
+    gtk_widget_set_margin_start(a->drift_detail, 18);
+    gtk_widget_set_margin_end(a->drift_detail, 18);
+    gtk_widget_set_margin_bottom(a->drift_detail, 14);
+    gtk_box_append(GTK_BOX(drift), a->drift_detail);
+    gtk_box_append(GTK_BOX(body), drift);
+
+    // --- axis feel ----------------------------------------------------------
+    GtkWidget* feel = card("AXIS FEEL", "soft response around the centre, or a harder edge");
+    GtkWidget* feel_drop = gtk_drop_down_new_from_strings(kAxisLabels);
+    gtk_widget_set_size_request(feel_drop, 170, -1);
+    a->feel_drop = feel_drop;
+    add_row(feel, row("Axis", nullptr, feel_drop));
+
+    GtkWidget* presets = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_add_css_class(presets, "linked");
+    struct Preset {
+        const char* label;
+        int curve;
+    };
+    const Preset kPresets[] = {{"Soft", 160}, {"Linear", 100}, {"Hard", 60}};
+    for (const auto& p : kPresets) {
+        GtkWidget* b = gtk_button_new_with_label(p.label);
+        g_object_set_data(G_OBJECT(b), "curve", GINT_TO_POINTER(p.curve));
+        g_signal_connect(b, "clicked", G_CALLBACK(on_feel_preset), a);
+        gtk_box_append(GTK_BOX(presets), b);
+    }
+    add_row(feel, row("Response", "soft rounds the centre, hard sharpens it", presets));
+
+    GtkWidget* dz = nullptr;
+    GtkWidget* dz_slider = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 0.0, 0.30, 0.01);
+    gtk_scale_set_draw_value(GTK_SCALE(dz_slider), TRUE);
+    gtk_scale_set_value_pos(GTK_SCALE(dz_slider), GTK_POS_RIGHT);
+    gtk_widget_set_size_request(dz_slider, 200, -1);
+    dz = dz_slider;
+    a->feel_deadzone = dz;
+    g_signal_connect(dz, "value-changed", G_CALLBACK(on_feel_deadzone), a);
+    add_row(feel, row("Deadzone", "ignore small movements around the centre", dz));
+
+    a->feel_curve = gtk_label_new("linear");
+    gtk_widget_add_css_class(a->feel_curve, "mono");
+    add_row(feel, row("Current response", nullptr, a->feel_curve));
+    gtk_box_append(GTK_BOX(body), feel);
+
+    // --- diagnosis ----------------------------------------------------------
+    GtkWidget* diag = card("DIAGNOSIS", "permissions, endpoints, grab, rest positions");
+    GtkWidget* run = gtk_button_new_with_label("Run diagnosis");
+    a->checks_pill = gtk_label_new("not run");
+    set_pill(a->checks_pill, "pill-warn", "not run");
+    GtkWidget* diag_ctl = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_box_append(GTK_BOX(diag_ctl), a->checks_pill);
+    gtk_box_append(GTK_BOX(diag_ctl), run);
+    add_row(diag, row("Health check", nullptr, diag_ctl));
+    a->checks_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_box_append(GTK_BOX(diag), a->checks_box);
+    gtk_box_append(GTK_BOX(body), diag);
+
+    g_signal_connect(run, "clicked", G_CALLBACK(on_run_checks), a);
+    g_signal_connect(feel_drop, "notify::selected", G_CALLBACK(on_feel_axis), a);
+    return page;
 }
 
 GtkWidget* build_profiles(App* a) {
-    AdwPreferencesPage* page = ADW_PREFERENCES_PAGE(adw_preferences_page_new());
+    GtkWidget* body = nullptr;
+    GtkWidget* page = page_root("Profiles",
+                                "JSON files in ~/.config/x52pro/profiles. Click one to activate it.",
+                                &body);
 
-    AdwPreferencesGroup* group = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
-    adw_preferences_group_set_title(group, "Profiles");
-    adw_preferences_group_set_description(group, "Click a profile to activate it");
-
+    GtkWidget* group = card("SAVED PROFILES", nullptr);
     GtkWidget* list = gtk_list_box_new();
     gtk_list_box_set_selection_mode(GTK_LIST_BOX(list), GTK_SELECTION_NONE);
     gtk_widget_add_css_class(list, "boxed-list");
     g_signal_connect(list, "row-activated", G_CALLBACK(on_profile_activated), a);
     a->profile_list = list;
-    adw_preferences_group_add(group, list);
+    gtk_box_append(GTK_BOX(group), list);
+    gtk_box_append(GTK_BOX(body), group);
 
-    GtkWidget* name_row = row("Profile name", "used when saving");
+    GtkWidget* manage = card("MANAGE", nullptr);
     GtkWidget* entry = gtk_entry_new();
     gtk_editable_set_text(GTK_EDITABLE(entry), "My profile");
-    adw_action_row_add_suffix(ADW_ACTION_ROW(name_row), entry);
-    a->profile_name_entry = entry;
-    adw_preferences_group_add(group, name_row);
+    a->profile_name = entry;
+    add_row(manage, row("Profile name", "used when saving or creating", entry));
 
-    GtkWidget* actions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    GtkWidget* actions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_add_css_class(actions, "linked");
     GtkWidget* save = gtk_button_new_with_label("Save");
     GtkWidget* newp = gtk_button_new_with_label("New");
     GtkWidget* del = gtk_button_new_with_label("Delete");
@@ -869,24 +1357,168 @@ GtkWidget* build_profiles(App* a) {
     gtk_box_append(GTK_BOX(actions), save);
     gtk_box_append(GTK_BOX(actions), newp);
     gtk_box_append(GTK_BOX(actions), del);
-    GtkWidget* actions_row = row("Manage", nullptr);
-    adw_action_row_add_suffix(ADW_ACTION_ROW(actions_row), actions);
-    adw_preferences_group_add(group, actions_row);
-    adw_preferences_page_add(page, group);
+    add_row(manage, row("Actions", "save overwrites the current name", actions));
+    gtk_box_append(GTK_BOX(body), manage);
 
-    AdwPreferencesGroup* about = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
-    adw_preferences_group_set_title(about, "About");
-    adw_preferences_group_add(about, row("X52 Pro Linux driver", "protocol 0x91 vendor API"));
-    adw_preferences_group_add(about, row("Daemon", default_socket_path().c_str()));
-    adw_preferences_page_add(page, about);
+    GtkWidget* about = card("ABOUT", nullptr);
+    add_row(about, row("Driver", "x52d · vendor protocol 0x91", nullptr));
+    add_row(about, row("Control socket", default_socket_path().c_str(), nullptr));
+    gtk_box_append(GTK_BOX(body), about);
+    return page;
+}
 
-    return GTK_WIDGET(page);
+// ---------------------------------------------------------------------------
+// window
+// ---------------------------------------------------------------------------
+GtkWidget* sidebar(App* a) {
+    GtkWidget* box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_add_css_class(box, "sidebar-pane");
+
+    GtkWidget* head = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    gtk_widget_set_margin_top(head, 18);
+    gtk_widget_set_margin_bottom(head, 14);
+    gtk_widget_set_margin_start(head, 18);
+    GtkWidget* icon = gtk_image_new_from_icon_name("input-gaming-symbolic");
+    gtk_image_set_pixel_size(GTK_IMAGE(icon), 22);
+    gtk_box_append(GTK_BOX(head), icon);
+    GtkWidget* titles = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    GtkWidget* t = gtk_label_new("X52 Pro");
+    gtk_widget_add_css_class(t, "row-title");
+    gtk_label_set_xalign(GTK_LABEL(t), 0.0f);
+    GtkWidget* s = gtk_label_new("H.O.T.A.S.");
+    gtk_widget_add_css_class(s, "row-sub");
+    gtk_label_set_xalign(GTK_LABEL(s), 0.0f);
+    gtk_box_append(GTK_BOX(titles), t);
+    gtk_box_append(GTK_BOX(titles), s);
+    gtk_box_append(GTK_BOX(head), titles);
+    gtk_box_append(GTK_BOX(box), head);
+
+    GtkWidget* list = gtk_list_box_new();
+    gtk_list_box_set_selection_mode(GTK_LIST_BOX(list), GTK_SELECTION_SINGLE);
+    gtk_widget_add_css_class(list, "navigation-sidebar");
+    gtk_widget_set_margin_start(list, 6);
+    gtk_widget_set_margin_end(list, 6);
+
+    struct Entry {
+        const char* page;
+        const char* icon;
+        const char* label;
+    };
+    const Entry entries[] = {
+        {"overview", "view-grid-symbolic", "Overview"},
+        {"display", "video-display-symbolic", "Display"},
+        {"leds", "preferences-color-symbolic", "LEDs"},
+        {"buttons", "input-keyboard-symbolic", "Buttons"},
+        {"test", "utilities-system-monitor-symbolic", "Test"},
+        {"profiles", "folder-symbolic", "Profiles"},
+    };
+    for (const auto& e : entries) {
+        GtkWidget* r = gtk_list_box_row_new();
+        GtkWidget* rowbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+        gtk_widget_set_margin_top(rowbox, 7);
+        gtk_widget_set_margin_bottom(rowbox, 7);
+        GtkWidget* img = gtk_image_new_from_icon_name(e.icon);
+        gtk_box_append(GTK_BOX(rowbox), img);
+        GtkWidget* lbl = gtk_label_new(e.label);
+        gtk_label_set_xalign(GTK_LABEL(lbl), 0.0f);
+        gtk_box_append(GTK_BOX(rowbox), lbl);
+        gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(r), rowbox);
+        g_object_set_data(G_OBJECT(r), "page", const_cast<char*>(e.page));
+        gtk_list_box_append(GTK_LIST_BOX(list), r);
+    }
+
+    g_signal_connect(list, "row-selected", G_CALLBACK(+[](GtkListBox*, GtkListBoxRow* r, gpointer d) {
+                         App* app = static_cast<App*>(d);
+                         if (!r) return;
+                         const char* page =
+                             static_cast<const char*>(g_object_get_data(G_OBJECT(r), "page"));
+                         if (page) adw_view_stack_set_visible_child_name(ADW_VIEW_STACK(app->stack), page);
+                     }),
+                     a);
+
+    GtkWidget* scroller = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroller), GTK_POLICY_NEVER,
+                                   GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroller), list);
+    gtk_widget_set_vexpand(scroller, TRUE);
+    gtk_box_append(GTK_BOX(box), scroller);
+    return box;
+}
+
+void dump_tree(GtkWidget* w, int depth) {
+    if (depth > 9) return;
+    GtkAllocation alloc{};
+    gtk_widget_get_allocation(w, &alloc);
+    std::fprintf(stderr, "%*s%s %dx%d vis=%d\n", depth * 2, "", G_OBJECT_TYPE_NAME(w),
+                 alloc.width, alloc.height, gtk_widget_get_visible(w) ? 1 : 0);
+    for (GtkWidget* c = gtk_widget_get_first_child(w); c; c = gtk_widget_get_next_sibling(c)) {
+        dump_tree(c, depth + 1);
+    }
+}
+
+gboolean screenshot_later(gpointer data) {
+    App* a = static_cast<App*>(data);
+    const char* path = std::getenv("X52PANEL_SHOT");
+    if (!path) return G_SOURCE_REMOVE;
+
+    GtkWidget* w = GTK_WIDGET(a->window);
+    int width = gtk_widget_get_width(w);
+    int height = gtk_widget_get_height(w);
+    GdkPaintable* paintable = GDK_PAINTABLE(gtk_widget_paintable_new(w));
+
+    GtkSnapshot* snapshot = gtk_snapshot_new();
+    gdk_paintable_snapshot(paintable, snapshot, width, height);
+    GskRenderNode* node = gtk_snapshot_free_to_node(snapshot);
+
+    GError* error = nullptr;
+    GskRenderer* renderer = gsk_cairo_renderer_new();
+    if (!gsk_renderer_realize(renderer, nullptr, &error)) {
+        std::fprintf(stderr, "shot: realize failed: %s\n", error ? error->message : "?");
+        return G_SOURCE_REMOVE;
+    }
+    graphene_rect_t rect = GRAPHENE_RECT_INIT(0, 0, (float)width, (float)height);
+    GdkTexture* texture = gsk_renderer_render_texture(renderer, node, &rect);
+    if (texture) {
+        gdk_texture_save_to_png(texture, path);
+        std::fprintf(stderr, "shot: wrote %s (%dx%d)\n", path, width, height);
+    } else {
+        std::fprintf(stderr, "shot: render_texture failed\n");
+    }
+    g_object_unref(texture);
+    gsk_render_node_unref(node);
+    gsk_renderer_unrealize(renderer);
+    g_object_unref(renderer);
+    g_object_unref(paintable);
+    std::fflush(stderr);
+    return G_SOURCE_REMOVE;
+}
+
+gboolean dump_tree_later(gpointer data) {
+    App* a = static_cast<App*>(data);
+    std::fprintf(stderr, "--- widget tree ---\n");
+    dump_tree(GTK_WIDGET(a->window), 0);
+    std::fflush(stderr);
+    return G_SOURCE_REMOVE;
 }
 
 gboolean on_poll(gpointer data) {
     App* a = static_cast<App*>(data);
     update_state(a);
     return G_SOURCE_CONTINUE;
+}
+
+void on_refresh_clicked(GtkButton*, gpointer data) {
+    App* a = static_cast<App*>(data);
+    call(a, "reconnect");
+    if (const char* page = std::getenv("X52PANEL_PAGE")) {
+        adw_view_stack_set_visible_child_name(ADW_VIEW_STACK(a->stack), page);
+    }
+
+    refresh_profile(a);
+    reload_profiles(a);
+    rebuild_bindings(a);
+    update_state(a);
+    toast(a, "Reconnected");
 }
 
 void on_activate(GtkApplication* app, gpointer data) {
@@ -897,50 +1529,70 @@ void on_activate(GtkApplication* app, gpointer data) {
 
     a->window = GTK_WINDOW(adw_application_window_new(app));
     gtk_window_set_title(GTK_WINDOW(a->window), "X52 Pro");
-    gtk_window_set_default_size(GTK_WINDOW(a->window), 980, 760);
+    gtk_window_set_default_size(GTK_WINDOW(a->window), 1080, 760);
 
     AdwToastOverlay* overlay = ADW_TOAST_OVERLAY(adw_toast_overlay_new());
     g_object_set_data(G_OBJECT(a->window), "overlay", overlay);
 
     GtkWidget* toolbar = adw_toolbar_view_new();
     AdwHeaderBar* header = ADW_HEADER_BAR(adw_header_bar_new());
-    GtkWidget* stack = adw_view_stack_new();
-    a->stack = stack;
 
-    GtkWidget* overview = build_overview(a);
-    GtkWidget* display = build_display(a);
-    GtkWidget* leds = build_leds(a);
-    GtkWidget* buttons = build_buttons(a);
-    GtkWidget* profiles = build_profiles(a);
+    GtkWidget* title_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_set_valign(title_box, GTK_ALIGN_CENTER);
+    GtkWidget* title = gtk_label_new("X52 Pro");
+    gtk_widget_add_css_class(title, "row-title");
+    a->window_subtitle = gtk_label_new("connecting…");
+    gtk_widget_add_css_class(a->window_subtitle, "row-sub");
+    gtk_box_append(GTK_BOX(title_box), title);
+    gtk_box_append(GTK_BOX(title_box), a->window_subtitle);
+    adw_header_bar_set_title_widget(header, title_box);
 
-    adw_view_stack_add_titled(ADW_VIEW_STACK(stack), overview, "overview", "Overview");
-    adw_view_stack_add_titled(ADW_VIEW_STACK(stack), display, "display", "Display");
-    adw_view_stack_add_titled(ADW_VIEW_STACK(stack), leds, "leds", "LEDs");
-    adw_view_stack_add_titled(ADW_VIEW_STACK(stack), buttons, "buttons", "Buttons");
-    adw_view_stack_add_titled(ADW_VIEW_STACK(stack), profiles, "profiles", "Profiles");
+    GtkWidget* refresh = gtk_button_new_from_icon_name("view-refresh-symbolic");
+    gtk_widget_set_tooltip_text(refresh, "Reconnect and reload");
+    g_signal_connect(refresh, "clicked", G_CALLBACK(on_refresh_clicked), a);
+    adw_header_bar_pack_end(header, refresh);
 
-    AdwViewSwitcherTitle* switcher = ADW_VIEW_SWITCHER_TITLE(adw_view_switcher_title_new());
-    adw_view_switcher_title_set_stack(switcher, ADW_VIEW_STACK(stack));
-    adw_header_bar_set_title_widget(header, GTK_WIDGET(switcher));
+    a->stack = adw_view_stack_new();
+    adw_view_stack_add_titled(ADW_VIEW_STACK(a->stack), build_overview(a), "overview", "Overview");
+    adw_view_stack_add_titled(ADW_VIEW_STACK(a->stack), build_display(a), "display", "Display");
+    adw_view_stack_add_titled(ADW_VIEW_STACK(a->stack), build_leds(a), "leds", "LEDs");
+    adw_view_stack_add_titled(ADW_VIEW_STACK(a->stack), build_buttons(a), "buttons", "Buttons");
+    adw_view_stack_add_titled(ADW_VIEW_STACK(a->stack), build_test(a), "test", "Test");
+    adw_view_stack_add_titled(ADW_VIEW_STACK(a->stack), build_profiles(a), "profiles", "Profiles");
+
+    GtkWidget* split = adw_overlay_split_view_new();
+    adw_overlay_split_view_set_sidebar(ADW_OVERLAY_SPLIT_VIEW(split), sidebar(a));
+    adw_overlay_split_view_set_content(ADW_OVERLAY_SPLIT_VIEW(split), a->stack);
+    adw_overlay_split_view_set_show_sidebar(ADW_OVERLAY_SPLIT_VIEW(split), TRUE);
+    adw_overlay_split_view_set_min_sidebar_width(ADW_OVERLAY_SPLIT_VIEW(split), 220);
+    adw_overlay_split_view_set_max_sidebar_width(ADW_OVERLAY_SPLIT_VIEW(split), 260);
 
     adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(toolbar), GTK_WIDGET(header));
-    adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(toolbar), stack);
+    adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(toolbar), split);
     adw_toast_overlay_set_child(overlay, toolbar);
     adw_application_window_set_content(ADW_APPLICATION_WINDOW(a->window), GTK_WIDGET(overlay));
 
+    if (const char* page = std::getenv("X52PANEL_PAGE")) {
+        adw_view_stack_set_visible_child_name(ADW_VIEW_STACK(a->stack), page);
+    }
+
     refresh_profile(a);
-    reload_profile_list(a);
-    rebuild_button_rows(a);
+    reload_profiles(a);
+    rebuild_bindings(a);
     update_state(a);
 
     a->poll_id = g_timeout_add(kPollMs, on_poll, a);
-
+    if (std::getenv("X52PANEL_DUMP")) g_timeout_add(1500, dump_tree_later, a);
+    if (std::getenv("X52PANEL_SHOT")) g_timeout_add(2200, screenshot_later, a);
     gtk_window_present(GTK_WINDOW(a->window));
 }
 
 void on_shutdown(GApplication*, gpointer data) {
     App* a = static_cast<App*>(data);
-    if (a->poll_id) g_source_remove(a->poll_id);
+    if (a->poll_id) {
+        g_source_remove(a->poll_id);
+        a->poll_id = 0;
+    }
 }
 
 }  // namespace
@@ -951,9 +1603,6 @@ int main(int argc, char** argv) {
         adw_application_new("org.x52pro.Panel", G_APPLICATION_DEFAULT_FLAGS);
     g_signal_connect(application, "activate", G_CALLBACK(on_activate), &app);
     g_signal_connect(application, "shutdown", G_CALLBACK(on_shutdown), &app);
-
-    // The panel is a client: if the daemon is not there, say so instead of
-    // silently showing an empty window.
     int status = g_application_run(G_APPLICATION(application), argc, argv);
     g_object_unref(application);
     return status;
