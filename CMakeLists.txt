@@ -30,6 +30,7 @@ add_library(x52core STATIC
     src/core/engine.cpp
     src/core/client.cpp
     src/core/diagnostics.cpp
+    src/core/settings.cpp
 )
 target_include_directories(x52core PUBLIC ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/third_party)
 target_link_libraries(x52core PUBLIC PkgConfig::LIBUSB)

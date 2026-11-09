@@ -103,7 +103,7 @@ sudo ./scripts/install-udev.sh
 
 ### Control panel
 
-`x52panel` has six pages:
+`x52panel` has seven pages:
 
 | Page | What it does |
 | --- | --- |
@@ -113,6 +113,7 @@ sudo ./scripts/install-udev.sh
 | Buttons | per-mode and shift-layer bindings for all 39 buttons |
 | Test | live input, stick/throttle visualisation, drift, axis feel, diagnosis |
 | Profiles | activate, save, create, delete profiles |
+| Settings | autostart, start minimised, autosave, USB link test, capabilities |
 
 ### Command line
 

@@ -43,6 +43,8 @@ void usage() {
         "  shift <on|off>\n"
         "  test                         run the health check\n"
         "  drift [seconds]              measure axis rest positions\n"
+        "  settings [key value]         show or change application settings\n"
+        "  link                         measure the vendor channel latency\n"
         "\n"
         "Modes and profiles\n"
         "  mode <1|2|3>\n"
@@ -203,7 +205,9 @@ int main(int argc, char** argv) {
 
     if (cmd == "led") {
         if (argc < 4) return fail("led needs <name|all> <colour>");
-        ok = c.request("set_led", {{"led", argv[2]}, {"color", argv[3]}}, result, error);
+        json args{{"led", argv[2]}, {"color", argv[3]}};
+        if (argc > 4 && std::string(argv[4]) == "--persist") args["persist"] = true;
+        ok = c.request("set_led", args, result, error);
         return ok ? 0 : fail(error);
     }
 
@@ -355,6 +359,37 @@ int main(int argc, char** argv) {
             return 0;
         }
         return fail("unknown profile action '" + action + "'");
+    }
+
+    if (cmd == "settings") {
+        if (argc >= 4) {
+            json args;
+            std::string key = argv[2];
+            std::string value = argv[3];
+            if (value == "on" || value == "true" || value == "1") args[key] = true;
+            else if (value == "off" || value == "false" || value == "0") args[key] = false;
+            else args[key] = value;
+            ok = c.request("set_settings", args, result, error);
+            if (!ok) return fail(error);
+            std::cout << result.dump(2) << "\n";
+            return 0;
+        }
+        ok = c.request("get_settings", result, error);
+        if (!ok) return fail(error);
+        std::cout << result.dump(2) << "\n";
+        return 0;
+    }
+
+    if (cmd == "link") {
+        ok = c.request("link_test", result, error);
+        if (!ok) return fail(error);
+        std::cout << "transfers " << result.value("samples", 0) << ", failures "
+                  << result.value("failures", 0) << "\nwrite average "
+                  << result.value("avg_ms", 0.0) << " ms, worst " << result.value("max_ms", 0.0)
+                  << " ms\nframes in the last 2 s " << result.value("frames_2s", 0) << "\n"
+                  << (result.value("valid", false) ? "healthy" : "degraded") << ": "
+                  << result.value("note", std::string()) << "\n";
+        return 0;
     }
 
     if (cmd == "test" || cmd == "diagnostics") {

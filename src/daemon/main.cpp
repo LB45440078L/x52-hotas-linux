@@ -41,6 +41,7 @@
 #include "x52/leds.hpp"
 #include "x52/mfd.hpp"
 #include "x52/profile.hpp"
+#include "x52/settings.hpp"
 #include "x52/uinput.hpp"
 
 using json = nlohmann::json;
@@ -155,6 +156,9 @@ private:
     json cmd_profile(const json& args);
     json cmd_text(const json& args);
     json cmd_apply_axis(const json& args);
+    json cmd_settings(const json& args);
+    json cmd_link_test();
+    void mark_dirty();
     json diagnostics_json() const;
     json input_frame() const;
 
@@ -181,6 +185,12 @@ private:
     std::vector<std::string> cached_profiles_;
     uint64_t next_profiles_us_ = 0;
     uint64_t last_input_push_us_ = 0;
+    AppSettings settings_;
+    bool dirty_settings_ = false;
+    uint64_t last_change_us_ = 0;
+    std::array<uint64_t, 512> frame_ring_{};
+    std::size_t frame_pos_ = 0;
+    std::size_t frame_filled_ = 0;
 
     std::vector<Client> clients_;
     int listen_fd_ = -1;
@@ -226,6 +236,15 @@ bool Daemon::try_connect() {
     if (profile_.settings.grab_device) {
         grabbed_ = input_.set_grab(true);
     }
+
+    if (settings_.verify_link) {
+        json link = cmd_link_test();
+        if (!link.value("valid", true)) {
+            std::fprintf(stderr, "x52d: link check: %s (%.2f ms average)\n",
+                         link.value("note", std::string("degraded")).c_str(),
+                         link.value("avg_ms", 0.0));
+        }
+    }
     return true;
 }
 
@@ -254,6 +273,12 @@ void Daemon::sync_clock() {
                       profile_.settings.clock_24h ? ClockFormat::H24 : ClockFormat::H12);
     clock_.set_offset(2, profile_.settings.clock3_offset,
                       profile_.settings.clock_24h ? ClockFormat::H24 : ClockFormat::H12);
+}
+
+void Daemon::mark_dirty() {
+    dirty_profile_ = true;
+    dirty_settings_ = true;
+    last_change_us_ = now_us();
 }
 
 void Daemon::apply_mode(bool force) {
@@ -453,7 +478,7 @@ json Daemon::cmd_set_led(const json& args) {
         for (std::size_t i = 0; i < c.size(); ++i) c[i] = leds_.get(static_cast<Led>(i));
         profile_.layer(engine_.mode()).leds = c;
         profile_.layer(engine_.mode()).has_leds = true;
-        dirty_profile_ = true;
+        mark_dirty();
     }
     return {{"ok", true}};
 }
@@ -463,13 +488,13 @@ json Daemon::cmd_set_brightness(const json& args) {
         int v = std::clamp(args.value("mfd", 128), 0, 255);
         profile_.settings.mfd_brightness = v;
         mfd_.set_brightness(static_cast<uint8_t>(v));
-        dirty_profile_ = true;
+        mark_dirty();
     }
     if (args.contains("led")) {
         int v = std::clamp(args.value("led", 128), 0, 255);
         profile_.settings.led_brightness = v;
         leds_.set_brightness(static_cast<uint8_t>(v));
-        dirty_profile_ = true;
+        mark_dirty();
     }
     return {{"ok", true}};
 }
@@ -486,7 +511,7 @@ json Daemon::cmd_text(const json& args) {
     if (jbool(args, "show", true)) {
         engine_.set_page(MfdPage::Custom);
     }
-    dirty_profile_ = true;
+    mark_dirty();
     next_mfd_us_ = 0;
     return {{"ok", true}};
 }
@@ -508,9 +533,76 @@ json Daemon::cmd_apply_axis(const json& args) {
         }
         if (args.contains("curve")) cfg.curve = std::clamp(args.value("curve", 1.0), 0.1, 4.0);
         if (args.contains("invert")) cfg.invert = jbool(args, "invert", false);
-        dirty_profile_ = true;
+        mark_dirty();
     }
     return {{"ok", true}};
+}
+
+json Daemon::cmd_settings(const json& args) {
+    if (args.contains("autostart")) settings_.autostart = jbool(args, "autostart", settings_.autostart);
+    if (args.contains("start_minimized")) {
+        settings_.start_minimized = jbool(args, "start_minimized", settings_.start_minimized);
+    }
+    if (args.contains("verify_link")) {
+        settings_.verify_link = jbool(args, "verify_link", settings_.verify_link);
+    }
+    if (args.contains("autosave")) settings_.autosave = jbool(args, "autosave", settings_.autosave);
+
+    if (args.contains("autostart") || args.contains("start_minimized")) {
+        std::string error;
+        if (!write_autostart_entry(settings_.autostart, settings_.start_minimized, &error)) {
+            return {{"error", "autostart: " + error}};
+        }
+    }
+
+    std::string error;
+    if (!settings_.save(&error)) return {{"error", "settings: " + error}};
+    dirty_settings_ = false;
+    return json::parse(settings_.to_json_string(0));
+}
+
+// Measures the health of the vendor channel: twenty back-to-back control
+// transfers. A healthy link answers in well under a millisecond.
+json Daemon::cmd_link_test() {
+    if (!connected_) return {{"error", "device not connected"}};
+
+    constexpr int kSamples = 20;
+    double total = 0.0, worst = 0.0;
+    int failures = 0;
+    for (int i = 0; i < kSamples; ++i) {
+        uint64_t start = now_us();
+        DeviceError e = dev_.send(CmdMfdBrightness,
+                                  static_cast<uint16_t>(profile_.settings.mfd_brightness));
+        uint64_t elapsed = now_us() - start;
+        if (e != DeviceError::None) {
+            ++failures;
+            continue;
+        }
+        double ms = static_cast<double>(elapsed) / 1000.0;
+        total += ms;
+        if (ms > worst) worst = ms;
+    }
+    double avg = (kSamples > failures) ? total / (kSamples - failures) : 0.0;
+
+    // Recent input frame rate, if anything moved in the last two seconds.
+    uint64_t t = now_us();
+    int frames = 0;
+    for (std::size_t i = 0; i < frame_filled_; ++i) {
+        uint64_t ts = frame_ring_[(frame_pos_ - 1 - i) % frame_ring_.size()];
+        if (t - ts > 2000000ull) break;
+        ++frames;
+    }
+
+    json j;
+    j["samples"] = kSamples;
+    j["failures"] = failures;
+    j["avg_ms"] = avg;
+    j["max_ms"] = worst;
+    j["frames_2s"] = frames;
+    j["valid"] = failures == 0 && avg < 5.0;
+    j["note"] = failures ? "control transfers failed"
+                          : (avg < 5.0 ? "vendor channel healthy" : "slow control transfers");
+    return j;
 }
 
 json Daemon::diagnostics_json() const {
@@ -613,7 +705,7 @@ json Daemon::cmd_profile(const json& args) {
             return {{"error", error}};
         }
         apply_profile(p, true);
-        dirty_profile_ = true;
+        mark_dirty();
         return {{"ok", true}};
     }
     if (action == "delete") {
@@ -686,6 +778,12 @@ void Daemon::handle_request(Client& c, const json& req) {
     } else if (cmd == "leds_refresh") {
         apply_leds();
         reply(c, req, {{"ok", true}});
+    } else if (cmd == "get_settings") {
+        reply(c, req, json::parse(settings_.to_json_string(0)));
+    } else if (cmd == "set_settings") {
+        reply(c, req, cmd_settings(args));
+    } else if (cmd == "link_test") {
+        reply(c, req, cmd_link_test());
     } else if (cmd == "drift") {
         std::string op = args.value("op", std::string("start"));
         if (op == "start") drift_.start();
@@ -814,21 +912,65 @@ int Daemon::run() {
         std::fprintf(stderr, "x52d: %s\n", uinput_.error().c_str());
     }
 
-    engine_.on_mode_changed = [this](int) { apply_mode(true); };
+    engine_.on_mode_changed = [this](int mode) {
+        apply_mode(true);
+        settings_.last_mode = mode;
+        dirty_settings_ = true;
+        last_change_us_ = now_us();
+    };
     engine_.on_shift_changed = [this](bool on) { leds_.set_shift(on); };
-    engine_.on_page_changed = [this](MfdPage) { next_mfd_us_ = 0; };
+    engine_.on_page_changed = [this](MfdPage page) {
+        next_mfd_us_ = 0;
+        settings_.last_page = mfd_page_name(page);
+        dirty_settings_ = true;
+        last_change_us_ = now_us();
+    };
 
-    // Start from the last used profile when available.
-    std::string last = profile_path_for("Default");
+    // Restore the last session: settings tell us which profile, mode and page
+    // were active when the daemon last stopped.
+    {
+        std::string load_error;
+        if (!settings_.load(&load_error)) {
+            std::fprintf(stderr, "x52d: settings: %s (writing defaults)\n", load_error.c_str());
+            settings_.save();
+        } else {
+            std::fprintf(stderr, "x52d: settings: restored profile=%s mode=%d page=%s\n",
+                         settings_.last_profile.c_str(), settings_.last_mode,
+                         settings_.last_page.c_str());
+        }
+    }
+    dirty_settings_ = false;
+
     Profile initial;
     std::string err;
-    if (Profile::load(last, initial, err)) {
-        profile_name_ = initial.name;
-    } else {
-        initial = Profile::make_example();
-        profile_name_ = initial.name;
+    bool loaded = false;
+    if (!settings_.last_profile.empty()) {
+        loaded = Profile::load(profile_path_for(settings_.last_profile), initial, err);
     }
+    if (!loaded) loaded = Profile::load(profile_path_for("Default"), initial, err);
+    if (!loaded) {
+        initial = Profile::make_example();
+    }
+    // Applying a profile fires the mode/page callbacks, which write the
+    // session state; capture the restored values first so they survive.
+    const int want_mode = settings_.last_mode;
+    const std::string want_page = settings_.last_page;
+
+    profile_name_ = initial.name;
     apply_profile(initial, true);
+
+    engine_.set_mode(want_mode);
+    MfdPage start_page = MfdPage::Status;
+    if (mfd_page_from_name(want_page, start_page)) engine_.set_page(start_page);
+
+    // The callbacks already wrote these, but make it explicit: a profile whose
+    // own page matches the restored page fires no callback at all.
+    settings_.last_mode = want_mode;
+    settings_.last_page = want_page;
+    dirty_settings_ = false;
+
+    std::fprintf(stderr, "x52d: session restored: mode=%d page=%s profile=%s\n", engine_.mode(),
+                 mfd_page_name(engine_.page()), profile_name_.c_str());
 
     cached_profiles_ = list_profiles();
     if (!try_connect()) next_reconnect_us_ = now_us() + kReconnectUs;
@@ -859,6 +1001,9 @@ int Daemon::run() {
                 got = true;
             }
             if (got) {
+                frame_ring_[frame_pos_ % frame_ring_.size()] = t;
+                ++frame_pos_;
+                if (frame_filled_ < frame_ring_.size()) ++frame_filled_;
                 drift_.add(state_);
                 for (std::size_t i = 0; i < kButtonCount; ++i) {
                     if (state_.buttons[i]) {
@@ -902,6 +1047,22 @@ int Daemon::run() {
             json frame{{"event", "input"}, {"data", input_frame()}};
             broadcast(frame, true);
             last_input_push_us_ = t;
+        }
+
+        // Persist after a short quiet period so a burst of edits costs one write.
+        if (t - last_change_us_ > 1200000ull && (dirty_profile_ || dirty_settings_)) {
+            std::string save_error;
+            if (dirty_profile_ && settings_.autosave) {
+                profile_.name = profile_name_;
+                if (!profile_.save(profile_path_for(profile_name_), save_error)) {
+                    std::fprintf(stderr, "x52d: autosave: %s\n", save_error.c_str());
+                }
+            }
+            settings_.last_profile = profile_name_;
+            settings_.save(&save_error);
+            cached_profiles_ = list_profiles();
+            dirty_profile_ = false;
+            dirty_settings_ = false;
         }
 
         if (t >= next_profiles_us_) {

@@ -26,6 +26,18 @@ HOTAS driver and profiler.
 - Health check covering permissions, endpoints, virtual devices, grab,
   rest positions, stuck buttons and clock refresh.
 
+### Persistence and settings
+- Settings live in `~/.config/x52pro/settings.json` and are written atomically.
+- Profile edits are saved automatically ~1.2 s after the last change, so the
+  panel no longer needs an explicit Save for LED colours, bindings, text,
+  brightness or axis trims.
+- The last profile, MFD page and mode are remembered and restored on start.
+  The hardware mode selector still wins as soon as the first input report
+  arrives: mode is a physical switch, not software state.
+- Settings page: start with the system (XDG autostart entry), start minimised,
+  verify the link at startup, autosave toggle, and a link test that times 20
+  vendor control transfers.
+
 ### Live updates
 - The daemon pushes compact input frames (raw axes + button bitmask) at up to
   250 Hz, bounded by the device's own report rate (~60 Hz on the tested unit).

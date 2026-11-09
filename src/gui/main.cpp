@@ -25,6 +25,7 @@
 #include "x52/client.hpp"
 #include "x52/profile.hpp"
 #include "x52/protocol.hpp"
+#include "x52/settings.hpp"
 
 using json = nlohmann::json;
 using namespace x52;
@@ -97,6 +98,14 @@ struct App {
 
     GtkWidget* profile_list = nullptr;
     GtkWidget* profile_name = nullptr;
+
+    GtkWidget* autostart_switch = nullptr;
+    GtkWidget* minimized_switch = nullptr;
+    GtkWidget* verify_switch = nullptr;
+    GtkWidget* autosave_switch = nullptr;
+    GtkWidget* link_pill = nullptr;
+    GtkWidget* link_detail = nullptr;
+    bool start_minimized = false;
 
     Client client;          // request/response
     Client stream_client;   // push events, non-blocking
@@ -1510,6 +1519,146 @@ GtkWidget* build_test(App* a) {
     return page;
 }
 
+void on_setting_toggled(GObject* obj, GParamSpec*, gpointer data);
+
+void apply_settings(App* a, const json& s) {
+    struct Pair {
+        GtkWidget* w;
+        const char* key;
+    };
+    const Pair pairs[] = {{a->autostart_switch, "autostart"},
+                          {a->minimized_switch, "start_minimized"},
+                          {a->verify_switch, "verify_link"},
+                          {a->autosave_switch, "autosave"}};
+    for (const auto& p : pairs) {
+        if (!p.w) continue;
+        g_signal_handlers_block_by_func(p.w, (gpointer)on_setting_toggled, a);
+        gtk_switch_set_active(GTK_SWITCH(p.w), s.value(p.key, false));
+        g_signal_handlers_unblock_by_func(p.w, (gpointer)on_setting_toggled, a);
+    }
+}
+
+void load_settings(App* a) {
+    json s = call(a, "get_settings");
+    if (s.contains("__error")) return;
+    apply_settings(a, s);
+}
+
+void on_setting_toggled(GObject* obj, GParamSpec*, gpointer data) {
+    App* a = static_cast<App*>(data);
+    const char* key = static_cast<const char*>(g_object_get_data(obj, "key"));
+    if (!key) return;
+    json args;
+    args[key] = gtk_switch_get_active(GTK_SWITCH(obj)) != FALSE;
+    json r = call(a, "set_settings", args);
+    if (r.contains("__error")) {
+        toast(a, r["__error"].get<std::string>());
+        return;
+    }
+    if (std::string(key) == "start_minimized" || std::string(key) == "autostart") {
+        toast(a, "Startup entry updated");
+    }
+}
+
+void on_link_test(GtkButton*, gpointer data) {
+    App* a = static_cast<App*>(data);
+    if (a->link_pill) set_pill(a->link_pill, "pill-warn", "testing…");
+    json r = call(a, "link_test");
+    if (r.contains("__error")) {
+        if (a->link_pill) set_pill(a->link_pill, "pill-bad", "failed");
+        if (a->link_detail) gtk_label_set_text(GTK_LABEL(a->link_detail), r["__error"].get<std::string>().c_str());
+        return;
+    }
+    bool ok = r.value("valid", false);
+    if (a->link_pill) set_pill(a->link_pill, ok ? "pill-ok" : "pill-warn", ok ? "healthy" : "degraded");
+    if (a->link_detail) {
+        char buf[256];
+        std::snprintf(buf, sizeof(buf),
+                      "%d transfers, %d failed\nwrite average %.2f ms, worst %.2f ms\n"
+                      "input frames in the last 2 s: %d\n%s",
+                      r.value("samples", 0), r.value("failures", 0), r.value("avg_ms", 0.0),
+                      r.value("max_ms", 0.0), r.value("frames_2s", 0),
+                      r.value("note", std::string()).c_str());
+        gtk_label_set_text(GTK_LABEL(a->link_detail), buf);
+    }
+}
+
+GtkWidget* build_settings(App* a) {
+    GtkWidget* body = nullptr;
+    GtkWidget* page = page_root("Settings",
+                                "Startup behaviour, persistence and a check of the USB link.",
+                                &body);
+
+    GtkWidget* startup = card("STARTUP", nullptr);
+
+    GtkWidget* autostart = gtk_switch_new();
+    g_object_set_data(G_OBJECT(autostart), "key", const_cast<char*>("autostart"));
+    g_signal_connect(autostart, "notify::active", G_CALLBACK(on_setting_toggled), a);
+    a->autostart_switch = autostart;
+    add_row(startup, row("Start with the system",
+                         "adds an entry to ~/.config/autostart", autostart));
+
+    GtkWidget* minimized = gtk_switch_new();
+    g_object_set_data(G_OBJECT(minimized), "key", const_cast<char*>("start_minimized"));
+    g_signal_connect(minimized, "notify::active", G_CALLBACK(on_setting_toggled), a);
+    a->minimized_switch = minimized;
+    add_row(startup, row("Start minimised", "the daemon keeps running, the window stays hidden",
+                         minimized));
+
+    GtkWidget* verify = gtk_switch_new();
+    g_object_set_data(G_OBJECT(verify), "key", const_cast<char*>("verify_link"));
+    g_signal_connect(verify, "notify::active", G_CALLBACK(on_setting_toggled), a);
+    a->verify_switch = verify;
+    add_row(startup, row("Verify the link at startup", "one quick control-transfer check", verify));
+    gtk_box_append(GTK_BOX(body), startup);
+
+    GtkWidget* persist = card("PERSISTENCE",
+                             "changes are written a moment after you stop editing");
+    GtkWidget* autosave = gtk_switch_new();
+    g_object_set_data(G_OBJECT(autosave), "key", const_cast<char*>("autosave"));
+    g_signal_connect(autosave, "notify::active", G_CALLBACK(on_setting_toggled), a);
+    a->autosave_switch = autosave;
+    add_row(persist, row("Save automatically", "profile edits are written to disk", autosave));
+    add_row(persist, row("Settings file", settings_path().c_str(), nullptr));
+    add_row(persist, row("Profiles", profile_directory().c_str(), nullptr));
+    gtk_box_append(GTK_BOX(body), persist);
+
+    GtkWidget* link = card("USB LINK", "measured on the vendor control channel");
+    GtkWidget* run = gtk_button_new_with_label("Run test");
+    a->link_pill = gtk_label_new("not run");
+    set_pill(a->link_pill, "pill-warn", "not run");
+    GtkWidget* ctl = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_box_append(GTK_BOX(ctl), a->link_pill);
+    gtk_box_append(GTK_BOX(ctl), run);
+    add_row(link, row("Transmission", "20 control transfers, timed", ctl));
+    a->link_detail = gtk_label_new("Run the test to measure write latency.");
+    gtk_widget_add_css_class(a->link_detail, "mono");
+    gtk_label_set_xalign(GTK_LABEL(a->link_detail), 0.0f);
+    gtk_widget_set_margin_start(a->link_detail, 18);
+    gtk_widget_set_margin_end(a->link_detail, 18);
+    gtk_widget_set_margin_bottom(a->link_detail, 14);
+    gtk_box_append(GTK_BOX(link), a->link_detail);
+    g_signal_connect(run, "clicked", G_CALLBACK(on_link_test), a);
+    gtk_box_append(GTK_BOX(body), link);
+
+    GtkWidget* caps = card("WHAT THE HARDWARE CAN DO",
+                           "everything this driver drives, including the parts the vendor UI hides");
+    add_row(caps, row("Throttle display", "3 x 16 characters plus a clock/date area", nullptr));
+    add_row(caps, row("LEDs", "11 LEDs, 9 of them bicolour (red / green / amber)", nullptr));
+    add_row(caps, row("Clocks", "3 clocks: base + two minute offsets, 12/24 hour", nullptr));
+    add_row(caps, row("Indicators", "shift lamp, throttle + POV blink module", nullptr));
+    add_row(caps, row("POV hat", "8 directions, reported in the input report", nullptr));
+    add_row(caps, row("Throttle ministick", "2 x 4-bit axes, exposed as a second hat", nullptr));
+    add_row(caps, row("Vendor channel", "request 0x91, write-only: the device has no readback",
+                      nullptr));
+    add_row(caps, row("On-device profiles",
+                      "the Windows driver exposes Toronto/Sydney/Programming interfaces for "
+                      "downloading profiles into the firmware; not implemented here",
+                      nullptr));
+    gtk_box_append(GTK_BOX(body), caps);
+    return page;
+}
+
 GtkWidget* build_profiles(App* a) {
     GtkWidget* body = nullptr;
     GtkWidget* page = page_root("Profiles",
@@ -1597,6 +1746,7 @@ GtkWidget* sidebar(App* a) {
         {"buttons", "input-keyboard-symbolic", "Buttons"},
         {"test", "utilities-system-monitor-symbolic", "Test"},
         {"profiles", "folder-symbolic", "Profiles"},
+        {"settings", "emblem-system-symbolic", "Settings"},
     };
     for (const auto& e : entries) {
         GtkWidget* r = gtk_list_box_row_new();
@@ -1763,12 +1913,18 @@ void on_refresh_clicked(GtkButton*, gpointer data) {
     refresh_profile(a);
     reload_profiles(a);
     rebuild_bindings(a);
+    load_settings(a);
     update_state(a);
     toast(a, "Reconnected");
 }
 
 void on_activate(GtkApplication* app, gpointer data) {
     App* a = static_cast<App*>(data);
+    if (a->window) {
+        // Second launch: just bring the existing window forward.
+        gtk_window_present(GTK_WINDOW(a->window));
+        return;
+    }
     a->app = app;
 
     css_install();
@@ -1805,6 +1961,7 @@ void on_activate(GtkApplication* app, gpointer data) {
     adw_view_stack_add_titled(ADW_VIEW_STACK(a->stack), build_buttons(a), "buttons", "Buttons");
     adw_view_stack_add_titled(ADW_VIEW_STACK(a->stack), build_test(a), "test", "Test");
     adw_view_stack_add_titled(ADW_VIEW_STACK(a->stack), build_profiles(a), "profiles", "Profiles");
+    adw_view_stack_add_titled(ADW_VIEW_STACK(a->stack), build_settings(a), "settings", "Settings");
 
     GtkWidget* split = adw_overlay_split_view_new();
     adw_overlay_split_view_set_sidebar(ADW_OVERLAY_SPLIT_VIEW(split), sidebar(a));
@@ -1825,6 +1982,7 @@ void on_activate(GtkApplication* app, gpointer data) {
     refresh_profile(a);
     reload_profiles(a);
     rebuild_bindings(a);
+    load_settings(a);
     update_state(a);
 
     for (std::size_t i = 0; i < kAxisCount; ++i) {
@@ -1855,6 +2013,9 @@ void on_shutdown(GApplication*, gpointer data) {
 
 int main(int argc, char** argv) {
     App app;
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--minimized") == 0) app.start_minimized = true;
+    }
     AdwApplication* application =
         adw_application_new("org.x52pro.Panel", G_APPLICATION_DEFAULT_FLAGS);
     g_signal_connect(application, "activate", G_CALLBACK(on_activate), &app);
