@@ -9,8 +9,8 @@ Type=simple
 ExecStart=%h/.local/bin/x52d
 Restart=on-failure
 RestartSec=2
-# Access to the grabbed evdev node and to uinput.
-SupplementaryGroups=input
+# Access comes from the udev ACL (70-x52pro.rules), so no extra groups are
+# needed here; adding a group the user is not in makes systemd refuse to start.
 
 [Install]
 WantedBy=graphical-session.target
