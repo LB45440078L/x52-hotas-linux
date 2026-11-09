@@ -9,8 +9,12 @@
 #include <adwaita.h>
 #include <gtk/gtk.h>
 
+#include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
+
+#include <glib-unix.h>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -85,7 +89,13 @@ struct App {
     GtkWidget* profile_list = nullptr;
     GtkWidget* profile_name = nullptr;
 
-    Client client;
+    Client client;          // request/response
+    Client stream_client;   // push events, non-blocking
+    guint stream_watch = 0;
+    uint64_t last_frame_us = 0;
+    uint64_t last_buttons_mask = ~0ull;
+    std::array<double, kAxisCount> last_frac{};
+    std::array<int, kAxisCount> last_pct{};
     json profile = json::object();
     json state = json::object();
     double stick_x = 0.5;
@@ -339,17 +349,53 @@ void draw_throttle(GtkDrawingArea*, cairo_t* cr, int width, int height, gpointer
 }
 
 void refresh_profile(App* a);
+void update_state(App* a);
 void on_clock_settings(GObject*, GParamSpec*, gpointer data);
 
-void update_state(App* a) {
-    json st = call(a, "get_state");
-    if (st.contains("__error")) {
-        set_pill(a->pill, "pill-bad", "offline");
-        if (a->window_subtitle) {
-            gtk_label_set_text(GTK_LABEL(a->window_subtitle), "daemon not running");
-        }
-        return;
+void set_button_pills(App* a, uint64_t mask) {
+    if (mask == a->last_buttons_mask) return;
+    a->last_buttons_mask = mask;
+    for (int i = 0; i < static_cast<int>(kButtonCount); ++i) {
+        GtkWidget* w = a->button_pills[i];
+        if (!w) continue;
+        if ((mask >> i) & 1ull) gtk_widget_add_css_class(w, "on");
+        else gtk_widget_remove_css_class(w, "on");
     }
+}
+
+// High-rate path: raw axis values and a button bitmask, straight from the
+// daemon's input loop.  Touches only widgets whose value actually changed.
+void apply_input(App* a, const json& d) {
+    static constexpr int kMax[kAxisCount] = {1023, 1023, 1023, 255, 255, 255, 255};
+
+    if (d.contains("a") && d["a"].is_array() && d["a"].size() >= kAxisCount) {
+        for (std::size_t i = 0; i < kAxisCount && i < d["a"].size(); ++i) {
+            double frac = static_cast<double>(d["a"][i].get<int>()) / kMax[i];
+            if (frac > 1.0) frac = 1.0;
+            if (frac < 0.0) frac = 0.0;
+
+            if (a->axis_bars[i] && std::fabs(frac - a->last_frac[i]) > 0.0015) {
+                gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(a->axis_bars[i]), frac);
+                a->last_frac[i] = frac;
+            }
+            int pct = static_cast<int>(frac * 100.0 + 0.5);
+            if (a->axis_values[i] && pct != a->last_pct[i]) {
+                char buf[16];
+                std::snprintf(buf, sizeof(buf), "%3d%%", pct);
+                gtk_label_set_text(GTK_LABEL(a->axis_values[i]), buf);
+                a->last_pct[i] = pct;
+            }
+        }
+        a->stick_x = static_cast<double>(d["a"][0].get<int>()) / 1023.0;
+        a->stick_y = static_cast<double>(d["a"][1].get<int>()) / 1023.0;
+        a->throttle = static_cast<double>(d["a"][3].get<int>()) / 255.0;
+        if (a->stick_area) gtk_widget_queue_draw(a->stick_area);
+        if (a->throttle_area) gtk_widget_queue_draw(a->throttle_area);
+    }
+    if (d.contains("b")) set_button_pills(a, d["b"].get<uint64_t>());
+}
+
+void apply_state(App* a, const json& st) {
     a->state = st;
 
     bool connected = st.value("connected", false);
@@ -393,16 +439,13 @@ void update_state(App* a) {
     if (a->stick_area) gtk_widget_queue_draw(a->stick_area);
     if (a->throttle_area) gtk_widget_queue_draw(a->throttle_area);
 
-    std::vector<int> pressed;
-    for (const auto& b : st["buttons"]) pressed.push_back(b.get<int>());
-    for (int i = 0; i < static_cast<int>(kButtonCount); ++i) {
-        GtkWidget* w = a->button_pills[i];
-        if (!w) continue;
-        bool on = false;
-        for (int p : pressed) on = on || (p == i);
-        if (on) gtk_widget_add_css_class(w, "on");
-        else gtk_widget_remove_css_class(w, "on");
+    uint64_t mask = 0;
+    for (const auto& b : st["buttons"]) {
+        int idx = b.get<int>();
+        if (idx >= 0 && idx < static_cast<int>(kButtonCount)) mask |= (1ull << idx);
     }
+    a->last_buttons_mask ^= ~0ull;  // force a refresh after a full state
+    set_button_pills(a, mask);
 
     for (int i = 0; i < static_cast<int>(Led::Count); ++i) {
         if (!a->led_dots[i]) continue;
@@ -1501,9 +1544,69 @@ gboolean dump_tree_later(gpointer data) {
     return G_SOURCE_REMOVE;
 }
 
+void handle_event(App* a, const std::string& line) {
+    json ev;
+    try {
+        ev = json::parse(line);
+    } catch (const std::exception&) {
+        return;
+    }
+    if (!ev.contains("event")) return;
+    const std::string kind = ev["event"].get<std::string>();
+    if (kind == "input") {
+        a->last_frame_us = static_cast<uint64_t>(g_get_monotonic_time());
+        apply_input(a, ev["data"]);
+    } else if (kind == "state") {
+        a->last_frame_us = static_cast<uint64_t>(g_get_monotonic_time());
+        apply_state(a, ev["data"]);
+    }
+}
+
+gboolean on_stream_event(int fd, GIOCondition cond, gpointer data) {
+    App* a = static_cast<App*>(data);
+    if (cond & (G_IO_HUP | G_IO_ERR | G_IO_NVAL)) {
+        a->stream_client.close();
+        a->stream_watch = 0;
+        return G_SOURCE_REMOVE;
+    }
+    std::string line;
+    int budget = 400;  // bounded work per wakeup
+    while (budget-- > 0 && a->stream_client.poll_line(line)) handle_event(a, line);
+    return G_SOURCE_CONTINUE;
+}
+
+void connect_stream(App* a) {
+    if (a->stream_client.is_connected()) return;
+    if (!a->stream_client.connect(default_socket_path(), 800)) return;
+    json reply;
+    std::string error;
+    if (!a->stream_client.request("subscribe", {{"stream", true}}, reply, error)) {
+        a->stream_client.close();
+        return;
+    }
+    a->stream_client.set_nonblocking(true);
+    a->stream_watch = g_unix_fd_add(a->stream_client.fd(), G_IO_IN, on_stream_event, a);
+    a->last_frame_us = static_cast<uint64_t>(g_get_monotonic_time());
+}
+
+void update_state(App* a) {
+    json st = call(a, "get_state");
+    if (st.contains("__error")) {
+        set_pill(a->pill, "pill-bad", "offline");
+        if (a->window_subtitle) {
+            gtk_label_set_text(GTK_LABEL(a->window_subtitle), "daemon not running");
+        }
+        return;
+    }
+    apply_state(a, st);
+}
+
 gboolean on_poll(gpointer data) {
     App* a = static_cast<App*>(data);
-    update_state(a);
+    uint64_t now = static_cast<uint64_t>(g_get_monotonic_time());
+    if (!a->stream_client.is_connected()) connect_stream(a);
+    // Fallback only: normal updates arrive as pushed frames.
+    if (a->last_frame_us == 0 || now - a->last_frame_us > 2500000ull) update_state(a);
     return G_SOURCE_CONTINUE;
 }
 
@@ -1581,7 +1684,12 @@ void on_activate(GtkApplication* app, gpointer data) {
     rebuild_bindings(a);
     update_state(a);
 
-    a->poll_id = g_timeout_add(kPollMs, on_poll, a);
+    for (std::size_t i = 0; i < kAxisCount; ++i) {
+        a->last_frac[i] = -1.0;
+        a->last_pct[i] = -1;
+    }
+    connect_stream(a);
+    a->poll_id = g_timeout_add(1000, on_poll, a);
     if (std::getenv("X52PANEL_DUMP")) g_timeout_add(1500, dump_tree_later, a);
     if (std::getenv("X52PANEL_SHOT")) g_timeout_add(2200, screenshot_later, a);
     gtk_window_present(GTK_WINDOW(a->window));
@@ -1593,6 +1701,11 @@ void on_shutdown(GApplication*, gpointer data) {
         g_source_remove(a->poll_id);
         a->poll_id = 0;
     }
+    if (a->stream_watch) {
+        g_source_remove(a->stream_watch);
+        a->stream_watch = 0;
+    }
+    a->stream_client.close();
 }
 
 }  // namespace

@@ -6,6 +6,8 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include <fcntl.h>
+
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
@@ -65,12 +67,46 @@ bool Client::connect(const std::string& path, int timeout_ms) {
         return false;
     }
 
-    struct timeval tv{};
-    tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
-    ::setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    ::setsockopt(fd_, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    if (timeout_ms > 0) {
+        struct timeval tv{};
+        tv.tv_sec = timeout_ms / 1000;
+        tv.tv_usec = (timeout_ms % 1000) * 1000;
+        ::setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        ::setsockopt(fd_, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    } else {
+        int flags = ::fcntl(fd_, F_GETFL, 0);
+        ::fcntl(fd_, F_SETFL, flags | O_NONBLOCK);
+    }
     return true;
+}
+
+bool Client::set_nonblocking(bool on) {
+    if (fd_ < 0) return false;
+    int flags = ::fcntl(fd_, F_GETFL, 0);
+    if (flags < 0) return false;
+    if (on) flags |= O_NONBLOCK;
+    else flags &= ~O_NONBLOCK;
+    return ::fcntl(fd_, F_SETFL, flags) == 0;
+}
+
+bool Client::poll_line(std::string& line) {
+    if (fd_ < 0) return false;
+    for (;;) {
+        auto pos = buffer_.find('\n');
+        if (pos != std::string::npos) {
+            line = buffer_.substr(0, pos);
+            buffer_.erase(0, pos + 1);
+            return true;
+        }
+        char buf[16384];
+        ssize_t n = ::recv(fd_, buf, sizeof(buf), MSG_DONTWAIT);
+        if (n > 0) {
+            buffer_.append(buf, static_cast<std::size_t>(n));
+            if (buffer_.size() > 1u << 20) buffer_.clear();
+            continue;
+        }
+        return false;
+    }
 }
 
 bool Client::read_line(std::string& line) {

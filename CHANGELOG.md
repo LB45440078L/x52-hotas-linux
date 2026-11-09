@@ -26,6 +26,13 @@ HOTAS driver and profiler.
 - Health check covering permissions, endpoints, virtual devices, grab,
   rest positions, stuck buttons and clock refresh.
 
+### Live updates
+- The daemon pushes compact input frames (raw axes + button bitmask) at up to
+  250 Hz, bounded by the device's own report rate (~60 Hz on the tested unit).
+- The panel consumes them on a non-blocking socket through the GLib main loop
+  instead of polling: measured 59.7 Hz end to end, 16 ms median latency, where
+  the previous build polled the daemon four times per second.
+
 ### Applications
 - `x52d` daemon with a JSON control socket.
 - `x52panel` GTK4/libadwaita panel: sidebar navigation, grouped cards,

@@ -38,7 +38,7 @@ hardware through the documented vendor control channel.
 
 **Test & diagnostics**
 
-- Live input map: every one of the 39 buttons lights up when pressed
+- Live input map at the device report rate (~60 Hz), not a fixed poll
 - Stick crosshair and throttle bar visualisation
 - Drift measurement: rest position and jitter per axis, with one-click
   centre correction written into the profile

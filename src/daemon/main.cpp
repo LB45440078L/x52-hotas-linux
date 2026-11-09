@@ -48,9 +48,10 @@ using namespace x52;
 
 namespace {
 
-constexpr int kTickMs = 16;
+constexpr int kTickMs = 8;
 constexpr uint64_t kMfdRefreshUs = 500000;    // 2 Hz
-constexpr uint64_t kStatePushUs = 200000;     // 5 Hz to subscribers
+constexpr uint64_t kStatePushUs = 200000;     // 5 Hz full state
+constexpr uint64_t kInputPushUs = 4000;       // 250 Hz cap, device is the limit
 constexpr uint64_t kReconnectUs = 2000000;    // retry every 2 s
 
 uint64_t now_us() {
@@ -113,6 +114,7 @@ struct Client {
     std::string in;
     std::string out;
     bool subscribed = false;
+    bool stream = false;   // wants high-rate input frames
 };
 
 class Daemon {
@@ -133,7 +135,7 @@ private:
     void handle_request(Client& c, const json& req);
     void reply(Client& c, const json& req, const json& result);
     void reply_error(Client& c, const json& req, const std::string& message);
-    void broadcast(const json& event);
+    void broadcast(const json& event, bool stream_only = false);
     void flush_client(Client& c);
 
     // state
@@ -150,6 +152,7 @@ private:
     json cmd_text(const json& args);
     json cmd_apply_axis(const json& args);
     json diagnostics_json() const;
+    json input_frame() const;
 
     Device dev_;
     Mfd mfd_;
@@ -173,6 +176,7 @@ private:
     std::array<uint64_t, kButtonCount> button_since_{};
     std::vector<std::string> cached_profiles_;
     uint64_t next_profiles_us_ = 0;
+    uint64_t last_input_push_us_ = 0;
 
     std::vector<Client> clients_;
     int listen_fd_ = -1;
@@ -370,13 +374,29 @@ void Daemon::reply_error(Client& c, const json& req, const std::string& message)
     c.out.push_back('\n');
 }
 
-void Daemon::broadcast(const json& event) {
+void Daemon::broadcast(const json& event, bool stream_only) {
     const std::string line = event.dump() + "\n";
     for (auto& c : clients_) {
         if (!c.subscribed) continue;
+        if (stream_only && !c.stream) continue;
         c.out += line;
         flush_client(c);
     }
+}
+
+// Compact per-frame payload: raw axis values, button bitmask, hat and thumb.
+json Daemon::input_frame() const {
+    json d;
+    d["a"] = state_.axis;
+    uint64_t mask = 0;
+    for (std::size_t i = 0; i < kButtonCount; ++i) {
+        if (state_.buttons[i]) mask |= (1ull << i);
+    }
+    d["b"] = mask;
+    d["h"] = state_.hat;
+    d["tx"] = state_.thumb_x;
+    d["ty"] = state_.thumb_y;
+    return d;
 }
 
 void Daemon::flush_client(Client& c) {
@@ -611,6 +631,7 @@ void Daemon::handle_request(Client& c, const json& req) {
         reply(c, req, state_json());
     } else if (cmd == "subscribe") {
         c.subscribed = true;
+        c.stream = jbool(args, "stream", false);
         reply(c, req, {{"ok", true}});
         json ev{{"event", "state"}, {"data", state_json()}};
         c.out += ev.dump() + "\n";
@@ -825,6 +846,7 @@ int Daemon::run() {
         }
 
         // Input.
+        bool input_changed = false;
         if (connected_) {
             bool got = false;
             for (int i = 0; i < 32; ++i) {
@@ -844,6 +866,7 @@ int Daemon::run() {
                 engine_.set_now(t);
                 engine_.process(state_, prev_);
                 prev_ = state_;
+                input_changed = true;
                 uinput_.sync_joystick();
                 if (profile_.settings.grab_device && !grabbed_) {
                     grabbed_ = input_.set_grab(true);
@@ -871,6 +894,12 @@ int Daemon::run() {
             }
         }
 
+        if (input_changed && t - last_input_push_us_ >= kInputPushUs) {
+            json frame{{"event", "input"}, {"data", input_frame()}};
+            broadcast(frame, true);
+            last_input_push_us_ = t;
+        }
+
         if (t >= next_profiles_us_) {
             cached_profiles_ = list_profiles();
             next_profiles_us_ = t + 10000000;
@@ -893,6 +922,12 @@ int Daemon::run() {
         for (const auto& c : clients_) {
             if (c.fd >= 0) fds.push_back({c.fd, POLLIN, 0});
         }
+        std::size_t input_index = static_cast<std::size_t>(-1);
+        if (connected_ && input_.fd() >= 0) {
+            input_index = fds.size();
+            fds.push_back({input_.fd(), POLLIN, 0});
+        }
+
         int rc = ::poll(fds.data(), fds.size(), kTickMs);
         if (rc > 0) {
             if (fds[0].revents & POLLIN) accept_clients();

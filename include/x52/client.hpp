@@ -23,6 +23,7 @@ public:
     Client(const Client&) = delete;
     Client& operator=(const Client&) = delete;
 
+    // timeout_ms = 0 makes the socket non-blocking (used for event streams).
     bool connect(const std::string& path = default_socket_path(), int timeout_ms = 1500);
     void close();
     bool is_connected() const noexcept { return fd_ >= 0; }
@@ -35,6 +36,13 @@ public:
 
     // Reads the next unsolicited line (events).  Used by `x52ctl watch`.
     bool next_line(std::string& line, std::string& error);
+
+    // Non-blocking variant for GUI event loops: returns false when no complete
+    // line is buffered yet.
+    bool poll_line(std::string& line);
+    bool set_nonblocking(bool on);
+    int fd() const noexcept { return fd_; }
+    const std::string& buffered() const noexcept { return buffer_; }
 
     bool request(const std::string& cmd, nlohmann::json& result, std::string& error) {
         return request(cmd, nlohmann::json::object(), result, error);
