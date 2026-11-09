@@ -87,7 +87,8 @@ void print_status(const json& st) {
     std::cout << "Mode        : " << st.value("mode", 1)
               << "   shift: " << (st.value("shift", false) ? "on" : "off")
               << "   page: " << st.value("page", std::string("-")) << "\n";
-    std::cout << "Grabbed     : " << (st.value("grabbed", false) ? "yes" : "no") << "\n";
+    std::cout << "Evdev grab  : " << (st.value("grabbed", false) ? "yes" : "no")
+              << "   (does not stop games that use the legacy js0 node)\n";
 
     std::cout << "\nMFD  +------------------+\n";
     if (st.contains("mfd")) {
