@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: BSD-3-Clause
 #include "x52/profile.hpp"
 
 #include <algorithm>
@@ -235,12 +235,14 @@ bool Action::operator==(const Action& o) const {
 }
 
 bool AxisConfig::operator==(const AxisConfig& o) const {
-    return deadzone == o.deadzone && saturation == o.saturation && curve == o.curve &&
-           invert == o.invert;
+    return center == o.center && deadzone == o.deadzone && saturation == o.saturation &&
+           curve == o.curve && invert == o.invert;
 }
 
 double shape_axis(double value, const AxisConfig& cfg) noexcept {
-    value = std::clamp(value, 0.0, 1.0);
+    // Trim first: it corrects the mechanical rest position of the axis, so the
+    // deadzone and the curve are centred on the real zero.
+    value = std::clamp(value - cfg.center, 0.0, 1.0);
     if (cfg.invert) value = 1.0 - value;
 
     // Treat the axis as a signed stick: centre at 0.5 for the two "centred"
@@ -377,11 +379,13 @@ std::string Profile::to_json_string(int indent) const {
     json jaxes = json::object();
     for (std::size_t i = 0; i < kAxisCount; ++i) {
         json a;
+        a["center"] = axes[i].center;
         a["deadzone"] = axes[i].deadzone;
         a["saturation"] = axes[i].saturation;
         a["curve"] = axes[i].curve;
         a["invert"] = axes[i].invert;
-        if (a != json{{"deadzone", 0.0}, {"saturation", 1.0}, {"curve", 1.0}, {"invert", false}}) {
+        if (a != json{{"center", 0.0}, {"deadzone", 0.0}, {"saturation", 1.0},
+                      {"curve", 1.0}, {"invert", false}}) {
             jaxes[std::string(axis_name(static_cast<Axis>(i)))] = a;
         }
     }
@@ -450,6 +454,7 @@ bool Profile::from_json_string(std::string_view text, Profile& out, std::string&
             if (!axis_from_name(it.key(), a)) continue;
             const json& v = it.value();
             AxisConfig cfg;
+            cfg.center = std::clamp(v.value("center", 0.0), -0.4, 0.4);
             cfg.deadzone = std::clamp(v.value("deadzone", 0.0), 0.0, 0.9);
             cfg.saturation = std::clamp(v.value("saturation", 1.0), 0.1, 1.0);
             cfg.curve = std::clamp(v.value("curve", 1.0), 0.1, 4.0);

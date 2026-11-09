@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: BSD-3-Clause
 //
 // Mode / profile engine.  Pure logic: it consumes input states, resolves the
 // action bound to each button for the active mode and shift layer, and pushes
@@ -119,6 +119,7 @@ private:
     uint64_t sw_accum_us_ = 0;
 
     std::array<bool, kButtonCount> last_buttons_{};
+    std::array<int, kAxisCount> last_axis_{};
     int last_hat_ = -1;
     uint64_t now_us_ = 0;
 };

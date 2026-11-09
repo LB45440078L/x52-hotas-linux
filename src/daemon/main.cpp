@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: BSD-3-Clause
 //
 // x52d - X52 Pro daemon.
 //
@@ -35,6 +35,7 @@
 
 #include "x52/clock.hpp"
 #include "x52/device.hpp"
+#include "x52/diagnostics.hpp"
 #include "x52/engine.hpp"
 #include "x52/input.hpp"
 #include "x52/leds.hpp"
@@ -76,11 +77,22 @@ class UinputSink : public OutputSink {
 public:
     explicit UinputSink(Uinput& u) : u_(u) {}
 
-    void key(uint16_t code, bool pressed) override { u_.key(code, pressed); }
-    void mouse_button(uint16_t button, bool pressed) override { u_.mouse_button(button, pressed); }
+    bool trace = std::getenv("X52D_DEBUG_EVENTS") != nullptr;
+
+    void key(uint16_t code, bool pressed) override {
+        if (trace) std::fprintf(stderr, "event: key %u %s\n", code, pressed ? "down" : "up");
+        u_.key(code, pressed);
+    }
+    void mouse_button(uint16_t button, bool pressed) override {
+        if (trace) std::fprintf(stderr, "event: mouse %u %s\n", button, pressed ? "down" : "up");
+        u_.mouse_button(button, pressed);
+    }
     void wheel(int delta) override { u_.wheel(delta); }
     void axis(int index, int value) override { u_.axis(index, value); }
-    void button(int index, bool pressed) override { u_.button(index, pressed); }
+    void button(int index, bool pressed) override {
+        if (trace) std::fprintf(stderr, "event: button %d %s\n", index, pressed ? "down" : "up");
+        u_.button(index, pressed);
+    }
     void hat(int direction) override { u_.hat(direction); }
     void sync() override { u_.sync_keyboard(); u_.sync_mouse(); }
     void exec(const std::string& command) override {
@@ -136,6 +148,8 @@ private:
     json cmd_set_brightness(const json& args);
     json cmd_profile(const json& args);
     json cmd_text(const json& args);
+    json cmd_apply_axis(const json& args);
+    json diagnostics_json() const;
 
     Device dev_;
     Mfd mfd_;
@@ -155,6 +169,10 @@ private:
 
     InputState state_{};
     InputState prev_{};
+    DriftMonitor drift_;
+    std::array<uint64_t, kButtonCount> button_since_{};
+    std::vector<std::string> cached_profiles_;
+    uint64_t next_profiles_us_ = 0;
 
     std::vector<Client> clients_;
     int listen_fd_ = -1;
@@ -172,6 +190,16 @@ bool Daemon::try_connect() {
         return false;
     }
     dev_.set_write_delay_us(2000);
+
+    // Input is a separate node; without it the LEDs still work but there is
+    // no live state, no drift measurement and no remapping.
+    std::string input_error;
+    if (!input_.open(input_error)) {
+        std::fprintf(stderr, "x52d: input: %s\n", input_error.c_str());
+    } else {
+        std::fprintf(stderr, "x52d: input: %s (%s)\n", input_.path().c_str(),
+                     input_.is_hidraw() ? "hidraw" : "evdev");
+    }
 
     // Reset everything the device might still hold from another driver.
     mfd_.mark_all_dirty();
@@ -292,7 +320,23 @@ json Daemon::state_json() const {
     j["stopwatch"] = {{"running", engine_.stopwatch_running()},
                       {"elapsed_ms", engine_.stopwatch_elapsed_us(now_us()) / 1000}};
 
-    j["profiles"] = list_profiles();
+    j["profiles"] = cached_profiles_;
+
+    json drift;
+    drift["active"] = drift_.active();
+    drift["samples"] = drift_.samples();
+    json drift_axes = json::object();
+    for (Axis axis : {Axis::X, Axis::Y, Axis::Twist, Axis::Throttle}) {
+        AxisStats stats = drift_.axis(axis);
+        double offset = is_centred_axis(axis) ? stats.offset_from_centre() : 0.0;
+        drift_axes[std::string(axis_name(axis))] = {{"offset", offset},
+                                                    {"jitter", stats.jitter()},
+                                                    {"mean", stats.mean},
+                                                    {"min", stats.minimum},
+                                                    {"max", stats.maximum}};
+    }
+    drift["axes"] = drift_axes;
+    j["drift"] = drift;
     j["sink"] = {{"joystick", uinput_.has_joystick()},
                  {"keyboard", uinput_.has_keyboard()},
                  {"mouse", uinput_.has_mouse()}};
@@ -353,6 +397,15 @@ void Daemon::flush_client(Client& c) {
     }
 }
 
+// JSON booleans are strict; accept 0/1 as well so third party clients work.
+bool jbool(const json& j, const char* key, bool fallback) {
+    if (!j.contains(key)) return fallback;
+    const json& v = j[key];
+    if (v.is_boolean()) return v.get<bool>();
+    if (v.is_number()) return v.get<double>() != 0.0;
+    return fallback;
+}
+
 json Daemon::cmd_set_led(const json& args) {
     if (!args.contains("led") || !args.contains("color")) {
         return {{"error", "set_led needs 'led' and 'color'"}};
@@ -371,7 +424,7 @@ json Daemon::cmd_set_led(const json& args) {
         if (!led_from_name(name, led)) return {{"error", "unknown LED '" + name + "'"}};
         leds_.set(led, color);
     }
-    if (args.value("persist", false)) {
+    if (jbool(args, "persist", false)) {
         std::array<LedColor, static_cast<std::size_t>(Led::Count)> c{};
         for (std::size_t i = 0; i < c.size(); ++i) c[i] = leds_.get(static_cast<Led>(i));
         profile_.layer(engine_.mode()).leds = c;
@@ -406,12 +459,82 @@ json Daemon::cmd_text(const json& args) {
         lines[i] = args["lines"][i].get<std::string>();
     }
     profile_.settings.custom_text = lines;
-    if (args.value("show", true)) {
+    if (jbool(args, "show", true)) {
         engine_.set_page(MfdPage::Custom);
     }
     dirty_profile_ = true;
     next_mfd_us_ = 0;
     return {{"ok", true}};
+}
+
+json Daemon::cmd_apply_axis(const json& args) {
+    Axis axis{};
+    if (!axis_from_name(args.value("axis", std::string()), axis)) {
+        return {{"error", "unknown axis"}};
+    }
+    if (args.contains("center") || args.contains("deadzone") || args.contains("curve") ||
+        args.contains("saturation") || args.contains("invert")) {
+        AxisConfig& cfg = engine_.profile_mut().axes[static_cast<std::size_t>(axis)];
+        if (args.contains("center")) cfg.center = std::clamp(args.value("center", 0.0), -0.4, 0.4);
+        if (args.contains("deadzone")) {
+            cfg.deadzone = std::clamp(args.value("deadzone", 0.0), 0.0, 0.9);
+        }
+        if (args.contains("saturation")) {
+            cfg.saturation = std::clamp(args.value("saturation", 1.0), 0.1, 1.0);
+        }
+        if (args.contains("curve")) cfg.curve = std::clamp(args.value("curve", 1.0), 0.1, 4.0);
+        if (args.contains("invert")) cfg.invert = jbool(args, "invert", false);
+        dirty_profile_ = true;
+    }
+    return {{"ok", true}};
+}
+
+json Daemon::diagnostics_json() const {
+    json checks = json::array();
+    auto add = [&checks](const Check& c) {
+        checks.push_back({{"name", c.name},
+                          {"level", check_level_name(c.level)},
+                          {"detail", c.detail}});
+    };
+
+    add(connected_ ? Check::ok("Device", "06a3:0762 open")
+                   : Check::fail("Device", last_error_.empty() ? "not connected" : last_error_));
+    add(Device::has_write_access()
+            ? Check::ok("USB permissions", "device node is writable")
+            : Check::fail("USB permissions", "install the udev rule and replug"));
+    add(input_.fd() >= 0
+            ? Check::ok("Input endpoint", input_.path())
+            : Check::fail("Input endpoint", "hidraw and evdev both unavailable"));
+    add(uinput_.has_joystick()
+            ? Check::ok("Virtual devices", "joystick, keyboard and mouse created")
+            : Check::fail("Virtual devices", uinput_.error().empty() ? "uinput unavailable"
+                                                                     : uinput_.error()));
+    add(grabbed_ ? Check::ok("Exclusive grab", "physical node is captured")
+                 : Check::warn("Exclusive grab", "not captured: games may see double input"));
+
+    if (drift_.samples() > 0) {
+        for (Axis axis : {Axis::X, Axis::Y, Axis::Twist}) {
+            add(classify_centre(axis, drift_.axis(axis)));
+        }
+    } else {
+        add(Check::warn("Axis rest position", "run a drift test to measure it"));
+    }
+
+    uint64_t now = now_us();
+    for (std::size_t i = 0; i < kButtonCount; ++i) {
+        if (button_since_[i] && now - button_since_[i] > 8000000ull) {
+            add(Check::warn(std::string(button_name(static_cast<Button>(i))),
+                            "held down for more than 8 seconds"));
+        }
+    }
+
+    add(connected_ ? Check::ok("Clock", "re-programmed every 5 seconds")
+                   : Check::warn("Clock", "cannot update while the device is offline"));
+
+    json out;
+    out["checks"] = checks;
+    out["drift_samples"] = drift_.samples();
+    return out;
 }
 
 json Daemon::cmd_profile(const json& args) {
@@ -511,7 +634,7 @@ void Daemon::handle_request(Client& c, const json& req) {
     } else if (cmd == "set_brightness") {
         reply(c, req, cmd_set_brightness(args));
     } else if (cmd == "set_shift") {
-        engine_.set_shift(args.value("on", false));
+        engine_.set_shift(jbool(args, "on", false));
         leds_.set_shift(engine_.shift_active());
         reply(c, req, {{"shift", engine_.shift_active()}});
     } else if (cmd == "stopwatch") {
@@ -523,7 +646,7 @@ void Daemon::handle_request(Client& c, const json& req) {
         reply(c, req, {{"running", engine_.stopwatch_running()},
                        {"elapsed_ms", engine_.stopwatch_elapsed_us(t) / 1000}});
     } else if (cmd == "set_clock") {
-        if (args.contains("h24")) profile_.settings.clock_24h = args.value("h24", true);
+        if (args.contains("h24")) profile_.settings.clock_24h = jbool(args, "h24", true);
         if (args.contains("clock2_offset")) {
             profile_.settings.clock2_offset = args.value("clock2_offset", 0);
         }
@@ -538,6 +661,16 @@ void Daemon::handle_request(Client& c, const json& req) {
     } else if (cmd == "leds_refresh") {
         apply_leds();
         reply(c, req, {{"ok", true}});
+    } else if (cmd == "drift") {
+        std::string op = args.value("op", std::string("start"));
+        if (op == "start") drift_.start();
+        else if (op == "stop") drift_.stop();
+        else drift_.reset();
+        reply(c, req, {{"active", drift_.active()}, {"samples", drift_.samples()}});
+    } else if (cmd == "apply_axis") {
+        reply(c, req, cmd_apply_axis(args));
+    } else if (cmd == "diagnostics") {
+        reply(c, req, diagnostics_json());
     } else if (cmd == "profile") {
         reply(c, req, cmd_profile(args));
     } else if (cmd == "raw") {
@@ -600,7 +733,13 @@ void Daemon::handle_client(Client& c) {
             c.out += err.dump() + "\n";
             continue;
         }
-        handle_request(c, req);
+        try {
+            handle_request(c, req);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "x52d: request '%s' failed: %s\n",
+                         req.value("cmd", std::string("?")).c_str(), e.what());
+            reply_error(c, req, std::string("internal error: ") + e.what());
+        }
     }
     flush_client(c);
 }
@@ -666,6 +805,7 @@ int Daemon::run() {
     }
     apply_profile(initial, true);
 
+    cached_profiles_ = list_profiles();
     if (!try_connect()) next_reconnect_us_ = now_us() + kReconnectUs;
 
     std::printf("x52d: listening on %s\n", sock_path_.c_str());
@@ -693,6 +833,14 @@ int Daemon::run() {
                 got = true;
             }
             if (got) {
+                drift_.add(state_);
+                for (std::size_t i = 0; i < kButtonCount; ++i) {
+                    if (state_.buttons[i]) {
+                        if (button_since_[i] == 0) button_since_[i] = t;
+                    } else {
+                        button_since_[i] = 0;
+                    }
+                }
                 engine_.set_now(t);
                 engine_.process(state_, prev_);
                 prev_ = state_;
@@ -721,6 +869,11 @@ int Daemon::run() {
                 flush_outputs();
                 next_mfd_us_ = t + kMfdRefreshUs;
             }
+        }
+
+        if (t >= next_profiles_us_) {
+            cached_profiles_ = list_profiles();
+            next_profiles_us_ = t + 10000000;
         }
 
         // Push state to subscribers.

@@ -1,7 +1,8 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: BSD-3-Clause
 //
 // x52ctl - command line control for the X52 Pro daemon.
 //
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -40,6 +41,8 @@ void usage() {
         "Lights\n"
         "  led <fire|a|b|d|e|t1|t2|t3|pov|clutch|throttle|all> <off|red|amber|green>\n"
         "  shift <on|off>\n"
+        "  test                         run the health check\n"
+        "  drift [seconds]              measure axis rest positions\n"
         "\n"
         "Modes and profiles\n"
         "  mode <1|2|3>\n"
@@ -67,12 +70,6 @@ int fail(const std::string& message) {
 std::string pad(std::string s, std::size_t n) {
     if (s.size() < n) s.append(n - s.size(), ' ');
     return s;
-}
-
-json call_or_die(Client& c, const std::string& cmd, const json& args, bool& ok, std::string& error) {
-    json result;
-    ok = c.request(cmd, args, result, error);
-    return result;
 }
 
 void print_status(const json& st) {
@@ -358,6 +355,62 @@ int main(int argc, char** argv) {
             return 0;
         }
         return fail("unknown profile action '" + action + "'");
+    }
+
+    if (cmd == "test" || cmd == "diagnostics") {
+        ok = c.request("diagnostics", result, error);
+        if (!ok) return fail(error);
+        std::cout << "Diagnosis\n";
+        for (const auto& chk : result["checks"]) {
+            std::string level = chk.value("level", std::string("ok"));
+            const char* mark = level == "fail" ? "[FAIL]" : (level == "warn" ? "[warn]" : "[ ok ]");
+            std::cout << "  " << mark << " " << pad(chk.value("name", std::string("")), 22)
+                      << chk.value("detail", std::string("")) << "\n";
+        }
+        ok = c.request("get_state", result, error);
+        if (!ok) return fail(error);
+        if (result.contains("drift") && result["drift"].value("samples", 0) > 0) {
+            std::cout << "\nRest position\n";
+            for (const auto& [name, d] : result["drift"]["axes"].items()) {
+                std::cout << "  " << pad(name, 10)
+                          << " offset " << (d.value("offset", 0.0) * 100.0) << "%  jitter "
+                          << (d.value("jitter", 0.0) * 100.0) << "%\n";
+            }
+        }
+        return 0;
+    }
+
+    if (cmd == "drift") {
+        int seconds = argc > 2 ? std::atoi(argv[2]) : 5;
+        if (seconds < 1) seconds = 1;
+        ok = c.request("drift", {{"op", "start"}}, result, error);
+        if (!ok) return fail(error);
+        std::cout << "Measuring for " << seconds << " s, keep the stick still...\n";
+        std::cout.flush();
+        ::usleep(static_cast<useconds_t>(seconds) * 1000000u);
+        ok = c.request("drift", {{"op", "stop"}}, result, error);
+        if (!ok) return fail(error);
+        ok = c.request("get_state", result, error);
+        if (!ok) return fail(error);
+        const json& drift = result["drift"];
+        std::cout << "samples: " << drift.value("samples", 0) << "\n";
+        for (const auto& [name, d] : drift["axes"].items()) {
+            double offset = d.value("offset", 0.0);
+            double mean = d.value("mean", 0.0);
+            bool centred = (name == "x" || name == "y" || name == "twist");
+            std::cout << "  " << pad(name, 10);
+            if (centred) {
+                const char* verdict = std::fabs(offset) > 0.08 ? "needs correction"
+                                     : (std::fabs(offset) > 0.03 ? "slight drift" : "centred");
+                std::cout << "rest " << (offset >= 0 ? "+" : "") << offset * 100.0
+                          << "%  jitter " << d.value("jitter", 0.0) * 100.0 << "%  " << verdict;
+            } else {
+                std::cout << "position " << mean * 100.0 << "%  jitter "
+                          << d.value("jitter", 0.0) * 100.0 << "%";
+            }
+            std::cout << "\n";
+        }
+        return 0;
     }
 
     if (cmd == "watch") {

@@ -29,6 +29,7 @@ add_library(x52core STATIC
     src/core/profile.cpp
     src/core/engine.cpp
     src/core/client.cpp
+    src/core/diagnostics.cpp
 )
 target_include_directories(x52core PUBLIC ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/third_party)
 target_link_libraries(x52core PUBLIC PkgConfig::LIBUSB)
@@ -78,6 +79,7 @@ if(BUILD_TESTS)
         tests/test_profile.cpp
         tests/test_engine.cpp
         tests/test_clock.cpp
+        tests/test_diagnostics.cpp
     )
     target_link_libraries(x52_tests PRIVATE x52core)
     target_include_directories(x52_tests PRIVATE ${CMAKE_SOURCE_DIR}/tests)

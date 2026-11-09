@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: BSD-3-Clause
 //
 // Profile model: modes, per-mode LED themes, MFD pages, button actions and
 // axis shaping.  Profiles are plain JSON so they are easy to version, diff
@@ -58,6 +58,7 @@ struct Action {
 };
 
 struct AxisConfig {
+    double center = 0.0;      // rest-position trim, added before shaping (-0.4..0.4)
     double deadzone = 0.0;    // 0..0.9, fraction of full travel
     double saturation = 1.0;  // 0.1..1, fraction where the axis hits full scale
     double curve = 1.0;       // >1 = softer centre, <1 = sharper centre

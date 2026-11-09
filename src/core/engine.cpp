@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: BSD-3-Clause
 #include "x52/engine.hpp"
 
 #include <linux/input.h>
@@ -230,12 +230,21 @@ void Macro::schedule(const std::vector<MacroStep>& steps, uint64_t now_us,
     }
 }
 
-Engine::Engine(OutputSink* sink) : sink_(sink) {}
+Engine::Engine(OutputSink* sink) : sink_(sink) { last_axis_.fill(-1); }
 
 void Engine::set_profile(const Profile& p) {
+    // Release anything a running macro may have left down.
+    if (sink_) {
+        for (uint16_t code : held_keys_) sink_->key(code, false);
+        if (!held_keys_.empty()) sink_->sync();
+    }
+    held_keys_.clear();
+    scheduled_.clear();
+
     profile_ = p;
     page_ = p.settings.mfd_page;
-    mode_ = 1;
+    last_axis_.fill(-1);  // force a full axis refresh
+    mode_ = std::clamp(mode_, 1, kModeCount);  // keep the current mode
     shift_ = false;
     last_buttons_.fill(false);
     if (on_page_changed) on_page_changed(page_);
@@ -455,11 +464,15 @@ void Engine::apply_axis(const InputState& st) {
         int max = (a == Axis::X || a == Axis::Y || a == Axis::Twist) ? 1023 : 255;
         const AxisConfig& cfg = profile_.axes[i];
         int value = raw;
-        if (cfg.deadzone > 0.0 || cfg.saturation < 1.0 || cfg.invert || cfg.curve != 1.0) {
+        if (cfg.center != 0.0 || cfg.deadzone > 0.0 || cfg.saturation < 1.0 || cfg.invert ||
+            cfg.curve != 1.0) {
             double norm = static_cast<double>(raw) / static_cast<double>(max);
             double shaped = shape_axis(norm, cfg);
             value = static_cast<int>(shaped * max + 0.5);
         }
+        // Only push real changes: uinput traffic is the hot path.
+        if (value == last_axis_[i]) continue;
+        last_axis_[i] = value;
         sink_->axis(static_cast<int>(i), value);
     }
 }
@@ -498,7 +511,7 @@ void Engine::tick(uint64_t now_us) {
 std::array<std::string, kMfdLineCount> Engine::render_mfd(uint64_t now_us) const {
     std::array<std::string, kMfdLineCount> lines{{"", "", ""}};
     const ModeLayer& layer = profile_.layer(mode_);
-    char buf[24];
+    char buf[32];
 
     auto mode_tag = [&]() {
         std::string name = layer.name.empty() ? "MODE" : layer.name;

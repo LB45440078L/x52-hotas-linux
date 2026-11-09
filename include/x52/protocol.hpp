@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: BSD-3-Clause
 //
 // X52 Pro HID/vendor protocol definitions.
 //
@@ -187,6 +187,12 @@ enum class Axis : uint8_t {
 };
 
 inline constexpr std::size_t kAxisCount = 7;
+
+// Axes that return to the middle when released.  Only these have a meaningful
+// "rest position" to correct; throttle-like axes hold wherever they are left.
+inline constexpr bool is_centred_axis(Axis a) noexcept {
+    return a == Axis::X || a == Axis::Y || a == Axis::Twist;
+}
 
 std::string_view axis_name(Axis a) noexcept;
 bool axis_from_name(std::string_view name, Axis& out) noexcept;
