@@ -1,0 +1,16 @@
+# Build artefacts
+build/
+build-*/
+*.o
+*.a
+*.so
+compile_commands.json
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Local profiles created while testing
+*.local.json
