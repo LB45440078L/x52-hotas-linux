@@ -193,6 +193,7 @@ const char* mfd_page_name(MfdPage p) noexcept {
         case MfdPage::Status: return "status";
         case MfdPage::Custom: return "custom";
         case MfdPage::Profile: return "profile";
+        case MfdPage::Telemetry: return "telemetry";
     }
     return "status";
 }
@@ -204,6 +205,10 @@ bool mfd_page_from_name(std::string_view name, MfdPage& out) noexcept {
     if (s == "status" || s == "info") { out = MfdPage::Status; return true; }
     if (s == "custom" || s == "text") { out = MfdPage::Custom; return true; }
     if (s == "profile") { out = MfdPage::Profile; return true; }
+    if (s == "telemetry" || s == "game" || s == "flight") {
+        out = MfdPage::Telemetry;
+        return true;
+    }
     return false;
 }
 
@@ -374,6 +379,8 @@ std::string Profile::to_json_string(int indent) const {
     jsettings["clutch_as_shift"] = settings.clutch_as_shift;
     jsettings["mfd_clock_label"] = settings.mfd_clock_label;
     jsettings["custom_text"] = settings.custom_text;
+    jsettings["telemetry_source"] = settings.telemetry_source;
+    jsettings["telemetry_lines"] = settings.telemetry_lines;
     j["settings"] = jsettings;
 
     json jaxes = json::object();
@@ -390,6 +397,20 @@ std::string Profile::to_json_string(int indent) const {
         }
     }
     if (!jaxes.empty()) j["axes"] = jaxes;
+
+    if (!rules.empty()) {
+        json jrules = json::array();
+        for (const auto& r : rules) {
+            json item;
+            if (!r.name.empty()) item["name"] = r.name;
+            item["when"] = r.condition;
+            item["led"] = led_name(r.led);
+            item["color"] = led_color_name(r.color);
+            item["enabled"] = r.enabled;
+            jrules.push_back(item);
+        }
+        j["telemetry_rules"] = jrules;
+    }
 
     json jmodes = json::object();
     for (int m = 0; m < kModeCount; ++m) {
@@ -439,6 +460,15 @@ bool Profile::from_json_string(std::string_view text, Profile& out, std::string&
         p.settings.shift_on_pinky = s.value("shift_on_pinky", true);
         p.settings.clutch_as_shift = s.value("clutch_as_shift", false);
         p.settings.mfd_clock_label = s.value("mfd_clock_label", std::string("X52 PRO"));
+        p.settings.telemetry_source = s.value("telemetry_source", std::string("none"));
+        if (s.contains("telemetry_lines") && s["telemetry_lines"].is_array()) {
+            for (std::size_t i = 0;
+                 i < std::min<std::size_t>(kMfdLineCount, s["telemetry_lines"].size()); ++i) {
+                if (s["telemetry_lines"][i].is_string()) {
+                    p.settings.telemetry_lines[i] = s["telemetry_lines"][i].get<std::string>();
+                }
+            }
+        }
         if (s.contains("custom_text") && s["custom_text"].is_array()) {
             for (std::size_t i = 0; i < std::min<std::size_t>(kMfdLineCount, s["custom_text"].size()); ++i) {
                 if (s["custom_text"][i].is_string()) {
@@ -470,6 +500,19 @@ bool Profile::from_json_string(std::string_view text, Profile& out, std::string&
             try { idx = std::stoi(it.key()); } catch (...) { continue; }
             if (idx < 1 || idx > kModeCount || !it.value().is_object()) continue;
             mode_from_json(it.value(), p.modes[static_cast<std::size_t>(idx - 1)], warn);
+        }
+    }
+
+    if (j.contains("telemetry_rules") && j["telemetry_rules"].is_array()) {
+        for (const auto& item : j["telemetry_rules"]) {
+            if (!item.is_object()) continue;
+            TelemetryRule rule;
+            rule.name = item.value("name", std::string());
+            rule.condition = item.value("when", std::string());
+            rule.enabled = item.value("enabled", true);
+            led_from_name(item.value("led", std::string("fire")), rule.led);
+            led_color_from_name(item.value("color", std::string("amber")), rule.color);
+            if (!rule.condition.empty()) p.rules.push_back(std::move(rule));
         }
     }
 

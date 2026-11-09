@@ -39,8 +39,15 @@ const char* kActionNames[] = {"Passthrough", "Swallow", "Keyboard key", "Mouse b
                               "Run command", "Joystick button", nullptr};
 const char* kActionIds[] = {"passthrough", "none", "key", "mouse", "wheel",
                             "macro", "mode", "mfd_page", "exec", "button", nullptr};
-const char* kPageNames[] = {"Clock", "Stopwatch", "Status", "Custom text", "Profile", nullptr};
-const char* kPageIds[] = {"clock", "stopwatch", "status", "custom", "profile", nullptr};
+const char* kPageNames[] = {"Clock", "Stopwatch", "Status", "Custom text", "Profile",
+                            "Telemetry", nullptr};
+const char* kPageIds[] = {"clock", "stopwatch", "status", "custom", "profile", "telemetry",
+                          nullptr};
+const char* kTelemetrySources[] = {"Disabled", "War Thunder", nullptr};
+const char* kTelemetrySourceIds[] = {"none", "warthunder", nullptr};
+const char* kRuleLedNames[] = {"fire", "a", "b", "d", "e", "t1", "t2", "t3", "pov", "clutch",
+                               "throttle", nullptr};
+const char* kRuleColors[] = {"off", "red", "amber", "green", nullptr};
 const char* kAxisLabels[] = {"Roll (X)", "Pitch (Y)", "Yaw (twist)", "Throttle",
                              "Rotary X", "Rotary Y", "Slider", nullptr};
 const char* kAxisIds[] = {"x", "y", "twist", "throttle", "rotary-x", "rotary-y", "slider",
@@ -103,6 +110,16 @@ struct App {
     GtkWidget* minimized_switch = nullptr;
     GtkWidget* verify_switch = nullptr;
     GtkWidget* autosave_switch = nullptr;
+    GtkWidget* tele_source = nullptr;
+    GtkWidget* tele_pill = nullptr;
+    GtkWidget* tele_status = nullptr;
+    GtkWidget* tele_lines[3] = {nullptr, nullptr, nullptr};
+    GtkWidget* tele_values = nullptr;
+    GtkWidget* tele_rules_box = nullptr;
+    std::vector<GtkWidget*> rule_condition;
+    std::vector<GtkWidget*> rule_led;
+    std::vector<GtkWidget*> rule_color;
+
     GtkWidget* link_pill = nullptr;
     GtkWidget* link_detail = nullptr;
     bool start_minimized = false;
@@ -1520,6 +1537,7 @@ GtkWidget* build_test(App* a) {
 }
 
 void on_setting_toggled(GObject* obj, GParamSpec*, gpointer data);
+void refresh_telemetry(App* a);
 
 void apply_settings(App* a, const json& s) {
     struct Pair {
@@ -1581,6 +1599,237 @@ void on_link_test(GtkButton*, gpointer data) {
                       r.value("note", std::string()).c_str());
         gtk_label_set_text(GTK_LABEL(a->link_detail), buf);
     }
+}
+
+void rebuild_rule_rows(App* a);
+
+void on_tele_source(GObject* obj, GParamSpec*, gpointer data) {
+    App* a = static_cast<App*>(data);
+    guint idx = gtk_drop_down_get_selected(GTK_DROP_DOWN(obj));
+    if (!kTelemetrySourceIds[idx]) return;
+    json r = call(a, "set_telemetry", {{"source", kTelemetrySourceIds[idx]}});
+    if (r.contains("__error")) toast(a, r["__error"].get<std::string>());
+    else toast(a, "Telemetry source updated");
+    refresh_telemetry(a);
+}
+
+void on_tele_apply_lines(GtkButton*, gpointer data) {
+    App* a = static_cast<App*>(data);
+    json lines = json::array();
+    for (auto* e : a->tele_lines) lines.push_back(gtk_editable_get_text(GTK_EDITABLE(e)));
+    json r = call(a, "set_telemetry", {{"lines", lines}});
+    if (r.contains("__error")) toast(a, r["__error"].get<std::string>());
+    else toast(a, "MFD layout updated");
+}
+
+void on_tele_show(GtkButton*, gpointer data) {
+    App* a = static_cast<App*>(data);
+    call(a, "set_page", {{"page", "telemetry"}});
+    toast(a, "MFD switched to telemetry");
+}
+
+void on_rule_add(GtkButton*, gpointer data) {
+    App* a = static_cast<App*>(data);
+    if (!a->profile.contains("telemetry_rules") || !a->profile["telemetry_rules"].is_array()) {
+        a->profile["telemetry_rules"] = json::array();
+    }
+    a->profile["telemetry_rules"].push_back(
+        json{{"when", "gear < 0.05"}, {"led", "t3"}, {"color", "red"}, {"enabled", true}});
+    rebuild_rule_rows(a);
+}
+
+void on_rule_apply(GtkButton*, gpointer data) {
+    App* a = static_cast<App*>(data);
+    json rules = json::array();
+    for (std::size_t i = 0; i < a->rule_condition.size(); ++i) {
+        std::string cond = gtk_editable_get_text(GTK_EDITABLE(a->rule_condition[i]));
+        if (cond.empty()) continue;
+        guint led = gtk_drop_down_get_selected(GTK_DROP_DOWN(a->rule_led[i]));
+        guint color = gtk_drop_down_get_selected(GTK_DROP_DOWN(a->rule_color[i]));
+        rules.push_back(json{{"when", cond},
+                             {"led", kRuleLedNames[led]},
+                             {"color", kRuleColors[color]},
+                             {"enabled", true}});
+    }
+    json r = call(a, "set_telemetry", {{"rules", rules}});
+    if (r.contains("__error")) {
+        toast(a, r["__error"].get<std::string>());
+        return;
+    }
+    a->profile["telemetry_rules"] = rules;
+    toast(a, "LED rules applied");
+}
+
+void rebuild_rule_rows(App* a) {
+    if (!a->tele_rules_box) return;
+    a->rule_condition.clear();
+    a->rule_led.clear();
+    a->rule_color.clear();
+
+    GtkWidget* child = gtk_widget_get_first_child(a->tele_rules_box);
+    while (child) {
+        GtkWidget* next = gtk_widget_get_next_sibling(child);
+        gtk_box_remove(GTK_BOX(a->tele_rules_box), child);
+        child = next;
+    }
+
+    json rules = a->profile.contains("telemetry_rules") && a->profile["telemetry_rules"].is_array()
+                     ? a->profile["telemetry_rules"]
+                     : json::array();
+
+    for (const auto& rule : rules) {
+        GtkWidget* rowbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+        gtk_widget_add_css_class(rowbox, "row");
+
+        GtkWidget* when = gtk_entry_new();
+        gtk_editable_set_text(GTK_EDITABLE(when), rule.value("when", std::string()).c_str());
+        gtk_entry_set_placeholder_text(GTK_ENTRY(when), "gear < 0.05");
+        gtk_widget_set_hexpand(when, TRUE);
+        gtk_box_append(GTK_BOX(rowbox), when);
+
+        GtkWidget* arrow = gtk_label_new("→");
+        gtk_widget_add_css_class(arrow, "row-sub");
+        gtk_box_append(GTK_BOX(rowbox), arrow);
+
+        GtkWidget* led = gtk_drop_down_new_from_strings(kRuleLedNames);
+        std::string led_value = rule.value("led", std::string("fire"));
+        for (int i = 0; kRuleLedNames[i]; ++i) {
+            if (led_value == kRuleLedNames[i]) gtk_drop_down_set_selected(GTK_DROP_DOWN(led), i);
+        }
+        gtk_widget_set_size_request(led, 110, -1);
+        gtk_box_append(GTK_BOX(rowbox), led);
+
+        GtkWidget* color = gtk_drop_down_new_from_strings(kRuleColors);
+        std::string color_value = rule.value("color", std::string("amber"));
+        for (int i = 0; kRuleColors[i]; ++i) {
+            if (color_value == kRuleColors[i]) gtk_drop_down_set_selected(GTK_DROP_DOWN(color), i);
+        }
+        gtk_widget_set_size_request(color, 100, -1);
+        gtk_box_append(GTK_BOX(rowbox), color);
+
+        a->rule_condition.push_back(when);
+        a->rule_led.push_back(led);
+        a->rule_color.push_back(color);
+        gtk_box_append(GTK_BOX(a->tele_rules_box), rowbox);
+    }
+}
+
+void refresh_telemetry(App* a) {
+    json t = call(a, "telemetry");
+    if (t.contains("__error")) return;
+
+    bool valid = t.value("valid", false);
+    bool connected = t.value("connected", false);
+    if (a->tele_pill) {
+        if (valid) set_pill(a->tele_pill, "pill-ok", "live");
+        else if (connected) set_pill(a->tele_pill, "pill-warn", "no flight");
+        else set_pill(a->tele_pill, "pill-bad", "offline");
+    }
+    if (a->tele_status) {
+        std::string text = valid ? "receiving telemetry"
+                                 : t.value("error", std::string("no data"));
+        gtk_label_set_text(GTK_LABEL(a->tele_status), text.c_str());
+    }
+    if (a->tele_values) {
+        std::string text;
+        if (valid) {
+            char buf[900];
+            std::snprintf(buf, sizeof(buf),
+                          "ias %.0f   tas %.0f   alt %.0f\nmach %.2f   g %.1f   aoa %.1f\n"
+                          "vy %.1f   gear %.2f   fuel %.0f%%",
+                          t["values"].value("ias", 0.0), t["values"].value("tas", 0.0),
+                          t["values"].value("alt", 0.0), t["values"].value("mach", 0.0),
+                          t["values"].value("g", 0.0), t["values"].value("aoa", 0.0),
+                          t["values"].value("vy", 0.0), t["values"].value("gear", 0.0),
+                          t["values"].value("fuel_pct", 0.0));
+            text = buf;
+        } else {
+            text = "waiting for the game…";
+        }
+        gtk_label_set_text(GTK_LABEL(a->tele_values), text.c_str());
+    }
+    if (t.contains("lines") && t["lines"].is_array()) {
+        for (int i = 0; i < 3; ++i) {
+            if (!a->tele_lines[i]) continue;
+            std::string line = t["lines"][i].get<std::string>();
+            if (line.empty()) continue;
+            /* do not overwrite what the user is typing */ (void)line;
+        }
+    }
+}
+
+GtkWidget* build_telemetry(App* a) {
+    GtkWidget* body = nullptr;
+    GtkWidget* page = page_root("Telemetry",
+                                "Flight data from a running game, shown on the MFD and LEDs.",
+                                &body);
+
+    GtkWidget* source_card = card("SOURCE", "read-only local API, no game hooks");
+    GtkWidget* drop = gtk_drop_down_new_from_strings(kTelemetrySources);
+    gtk_widget_set_size_request(drop, 170, -1);
+    a->tele_source = drop;
+    a->tele_pill = gtk_label_new("offline");
+    set_pill(a->tele_pill, "pill-bad", "offline");
+    GtkWidget* src_ctl = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_box_append(GTK_BOX(src_ctl), a->tele_pill);
+    gtk_box_append(GTK_BOX(src_ctl), drop);
+    add_row(source_card, row("Game", "War Thunder: localhost:8111, needs a battle", src_ctl));
+
+    a->tele_status = gtk_label_new("idle");
+    gtk_widget_add_css_class(a->tele_status, "row-sub");
+    add_row(source_card, row("Status", nullptr, a->tele_status));
+    gtk_box_append(GTK_BOX(body), source_card);
+
+    GtkWidget* live = card("LIVE VALUES", nullptr);
+    a->tele_values = gtk_label_new("waiting for the game…");
+    gtk_widget_add_css_class(a->tele_values, "mono");
+    gtk_label_set_xalign(GTK_LABEL(a->tele_values), 0.0f);
+    gtk_widget_set_margin_start(a->tele_values, 18);
+    gtk_widget_set_margin_end(a->tele_values, 18);
+    gtk_widget_set_margin_bottom(a->tele_values, 14);
+    gtk_box_append(GTK_BOX(live), a->tele_values);
+    gtk_box_append(GTK_BOX(body), live);
+
+    GtkWidget* layout = card("MFD LAYOUT",
+                             "{ias} {alt} {mach} {g} {gear} {fuel_pct} {compass} {vy} …");
+    for (int i = 0; i < 3; ++i) {
+        GtkWidget* e = gtk_entry_new();
+        gtk_entry_set_max_length(GTK_ENTRY(e), 32);
+        gtk_editable_set_width_chars(GTK_EDITABLE(e), 24);
+        a->tele_lines[i] = e;
+        char title[16];
+        std::snprintf(title, sizeof(title), "Line %d", i + 1);
+        add_row(layout, row(title, nullptr, e));
+    }
+    GtkWidget* layout_buttons = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget* apply = gtk_button_new_with_label("Apply layout");
+    gtk_widget_add_css_class(apply, "suggested-action");
+    GtkWidget* show = gtk_button_new_with_label("Show on MFD");
+    gtk_box_append(GTK_BOX(layout_buttons), apply);
+    gtk_box_append(GTK_BOX(layout_buttons), show);
+    add_row(layout, row("Apply", "32 characters per line", layout_buttons));
+    g_signal_connect(apply, "clicked", G_CALLBACK(on_tele_apply_lines), a);
+    g_signal_connect(show, "clicked", G_CALLBACK(on_tele_show), a);
+    gtk_box_append(GTK_BOX(body), layout);
+
+    GtkWidget* rules = card("LED RULES",
+                            "condition on telemetry → LED colour; later rules win");
+    GtkWidget* box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    a->tele_rules_box = box;
+    gtk_box_append(GTK_BOX(rules), box);
+    GtkWidget* rule_buttons = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget* add = gtk_button_new_with_label("Add rule");
+    GtkWidget* apply_rules = gtk_button_new_with_label("Apply rules");
+    gtk_widget_add_css_class(apply_rules, "suggested-action");
+    gtk_box_append(GTK_BOX(rule_buttons), add);
+    gtk_box_append(GTK_BOX(rule_buttons), apply_rules);
+    add_row(rules, row("Example", "gear < 0.05 and alt > 100", rule_buttons));
+    g_signal_connect(add, "clicked", G_CALLBACK(on_rule_add), a);
+    g_signal_connect(apply_rules, "clicked", G_CALLBACK(on_rule_apply), a);
+    gtk_box_append(GTK_BOX(body), rules);
+
+    g_signal_connect(drop, "notify::selected", G_CALLBACK(on_tele_source), a);
+    return page;
 }
 
 GtkWidget* build_settings(App* a) {
@@ -1746,6 +1995,7 @@ GtkWidget* sidebar(App* a) {
         {"buttons", "input-keyboard-symbolic", "Buttons"},
         {"test", "utilities-system-monitor-symbolic", "Test"},
         {"profiles", "folder-symbolic", "Profiles"},
+        {"telemetry", "network-transmit-receive-symbolic", "Telemetry"},
         {"settings", "emblem-system-symbolic", "Settings"},
     };
     for (const auto& e : entries) {
@@ -1900,6 +2150,7 @@ gboolean on_poll(gpointer data) {
     if (!a->stream_client.is_connected()) connect_stream(a);
     // Fallback only: normal updates arrive as pushed frames.
     if (a->last_frame_us == 0 || now - a->last_frame_us > 2500000ull) update_state(a);
+    refresh_telemetry(a);
     return G_SOURCE_CONTINUE;
 }
 
@@ -1914,6 +2165,30 @@ void on_refresh_clicked(GtkButton*, gpointer data) {
     reload_profiles(a);
     rebuild_bindings(a);
     load_settings(a);
+    rebuild_rule_rows(a);
+
+    // Telemetry source + layout come from the profile.
+    if (a->profile.contains("settings")) {
+        const json& ps = a->profile["settings"];
+        std::string src = ps.value("telemetry_source", std::string("none"));
+        if (a->tele_source) {
+            for (int i = 0; kTelemetrySourceIds[i]; ++i) {
+                if (src == kTelemetrySourceIds[i]) {
+                    g_signal_handlers_block_by_func(a->tele_source, (gpointer)on_tele_source, a);
+                    gtk_drop_down_set_selected(GTK_DROP_DOWN(a->tele_source), i);
+                    g_signal_handlers_unblock_by_func(a->tele_source, (gpointer)on_tele_source, a);
+                }
+            }
+        }
+        if (ps.contains("telemetry_lines") && ps["telemetry_lines"].is_array()) {
+            for (int i = 0; i < 3 && i < static_cast<int>(ps["telemetry_lines"].size()); ++i) {
+                if (!a->tele_lines[i]) continue;
+                gtk_editable_set_text(GTK_EDITABLE(a->tele_lines[i]),
+                                      ps["telemetry_lines"][i].get<std::string>().c_str());
+            }
+        }
+    }
+    refresh_telemetry(a);
     update_state(a);
     toast(a, "Reconnected");
 }
@@ -1961,6 +2236,7 @@ void on_activate(GtkApplication* app, gpointer data) {
     adw_view_stack_add_titled(ADW_VIEW_STACK(a->stack), build_buttons(a), "buttons", "Buttons");
     adw_view_stack_add_titled(ADW_VIEW_STACK(a->stack), build_test(a), "test", "Test");
     adw_view_stack_add_titled(ADW_VIEW_STACK(a->stack), build_profiles(a), "profiles", "Profiles");
+    adw_view_stack_add_titled(ADW_VIEW_STACK(a->stack), build_telemetry(a), "telemetry", "Telemetry");
     adw_view_stack_add_titled(ADW_VIEW_STACK(a->stack), build_settings(a), "settings", "Settings");
 
     GtkWidget* split = adw_overlay_split_view_new();
@@ -1983,6 +2259,30 @@ void on_activate(GtkApplication* app, gpointer data) {
     reload_profiles(a);
     rebuild_bindings(a);
     load_settings(a);
+    rebuild_rule_rows(a);
+
+    // Telemetry source + layout come from the profile.
+    if (a->profile.contains("settings")) {
+        const json& ps = a->profile["settings"];
+        std::string src = ps.value("telemetry_source", std::string("none"));
+        if (a->tele_source) {
+            for (int i = 0; kTelemetrySourceIds[i]; ++i) {
+                if (src == kTelemetrySourceIds[i]) {
+                    g_signal_handlers_block_by_func(a->tele_source, (gpointer)on_tele_source, a);
+                    gtk_drop_down_set_selected(GTK_DROP_DOWN(a->tele_source), i);
+                    g_signal_handlers_unblock_by_func(a->tele_source, (gpointer)on_tele_source, a);
+                }
+            }
+        }
+        if (ps.contains("telemetry_lines") && ps["telemetry_lines"].is_array()) {
+            for (int i = 0; i < 3 && i < static_cast<int>(ps["telemetry_lines"].size()); ++i) {
+                if (!a->tele_lines[i]) continue;
+                gtk_editable_set_text(GTK_EDITABLE(a->tele_lines[i]),
+                                      ps["telemetry_lines"][i].get<std::string>().c_str());
+            }
+        }
+    }
+    refresh_telemetry(a);
     update_state(a);
 
     for (std::size_t i = 0; i < kAxisCount; ++i) {

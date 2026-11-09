@@ -45,6 +45,7 @@ void usage() {
         "  drift [seconds]              measure axis rest positions\n"
         "  settings [key value]         show or change application settings\n"
         "  link                         measure the vendor channel latency\n"
+        "  telemetry [source <name>]    game telemetry status / source\n"
         "\n"
         "Modes and profiles\n"
         "  mode <1|2|3>\n"
@@ -359,6 +360,37 @@ int main(int argc, char** argv) {
             return 0;
         }
         return fail("unknown profile action '" + action + "'");
+    }
+
+    if (cmd == "telemetry") {
+        if (argc >= 4 && std::string(argv[2]) == "source") {
+            ok = c.request("set_telemetry", {{"source", argv[3]}}, result, error);
+            if (!ok) return fail(error);
+            std::cout << "telemetry source: " << argv[3] << "\n";
+            return 0;
+        }
+        ok = c.request("telemetry", result, error);
+        if (!ok) return fail(error);
+        std::cout << "source    : " << result.value("source", std::string("none")) << "\n"
+                  << "status    : "
+                  << (result.value("valid", false) ? "live"
+                                                   : (result.value("connected", false) ? "no flight"
+                                                                                       : "offline"))
+                  << "\n";
+        if (!result.value("error", std::string()).empty()) {
+            std::cout << "error     : " << result.value("error", std::string()) << "\n";
+        }
+        if (result.value("valid", false)) {
+            std::cout << "\nvalues\n";
+            for (const auto& [k, v] : result["values"].items()) {
+                std::cout << "  " << pad(k, 10) << v << "\n";
+            }
+            std::cout << "\nmfd\n";
+            for (const auto& line : result["lines"]) {
+                std::cout << "  |" << pad(line.get<std::string>(), 16) << "|\n";
+            }
+        }
+        return 0;
     }
 
     if (cmd == "settings") {

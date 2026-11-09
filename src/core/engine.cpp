@@ -274,7 +274,7 @@ void Engine::set_page(MfdPage page) {
 }
 
 void Engine::next_page() {
-    int p = (static_cast<int>(page_) + 1) % 5;
+    int p = (static_cast<int>(page_) + 1) % 6;
     set_page(static_cast<MfdPage>(p));
 }
 
@@ -569,6 +569,13 @@ std::array<std::string, kMfdLineCount> Engine::render_mfd(uint64_t now_us) const
         }
         case MfdPage::Custom: {
             lines = profile_.settings.custom_text;
+            break;
+        }
+        case MfdPage::Telemetry: {
+            // The daemon replaces these with the live template rendering.
+            lines[0] = "GAME";
+            lines[1] = "NO TELEMETRY";
+            lines[2] = "";
             break;
         }
         case MfdPage::Profile: {

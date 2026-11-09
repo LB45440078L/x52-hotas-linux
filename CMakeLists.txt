@@ -31,6 +31,8 @@ add_library(x52core STATIC
     src/core/client.cpp
     src/core/diagnostics.cpp
     src/core/settings.cpp
+    src/core/telemetry.cpp
+    src/core/rules.cpp
 )
 target_include_directories(x52core PUBLIC ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/third_party)
 target_link_libraries(x52core PUBLIC PkgConfig::LIBUSB)
@@ -52,7 +54,8 @@ option(BUILD_TESTS "Build unit tests" ON)
 
 if(BUILD_DAEMON AND EXISTS ${CMAKE_SOURCE_DIR}/src/daemon/main.cpp)
     add_executable(x52d src/daemon/main.cpp)
-    target_link_libraries(x52d PRIVATE x52core)
+    find_package(Threads REQUIRED)
+    target_link_libraries(x52d PRIVATE x52core Threads::Threads)
     target_compile_definitions(x52d PRIVATE X52_DEFAULT_PROFILE_DIR="${CMAKE_INSTALL_DATADIR}")
     install(TARGETS x52d RUNTIME DESTINATION bin)
 endif()
@@ -81,6 +84,7 @@ if(BUILD_TESTS)
         tests/test_engine.cpp
         tests/test_clock.cpp
         tests/test_diagnostics.cpp
+        tests/test_telemetry.cpp
     )
     target_link_libraries(x52_tests PRIVATE x52core)
     target_include_directories(x52_tests PRIVATE ${CMAKE_SOURCE_DIR}/tests)

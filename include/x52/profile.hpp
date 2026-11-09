@@ -14,12 +14,13 @@
 #include <vector>
 
 #include "x52/protocol.hpp"
+#include "x52/rules.hpp"
 
 namespace x52 {
 
 inline constexpr int kModeCount = 3;
 
-enum class MfdPage : uint8_t { Clock = 0, Stopwatch, Status, Custom, Profile };
+enum class MfdPage : uint8_t { Clock = 0, Stopwatch, Status, Custom, Profile, Telemetry };
 const char* mfd_page_name(MfdPage p) noexcept;
 bool mfd_page_from_name(std::string_view name, MfdPage& out) noexcept;
 
@@ -90,6 +91,14 @@ struct Settings {
     bool shift_on_pinky = true;   // pinky switch acts as a shift layer
     bool clutch_as_shift = false; // hold clutch for the shift layer as well
     std::string mfd_clock_label = "X52 PRO";
+
+    // Game telemetry: source name and the three MFD lines it renders.
+    std::string telemetry_source = "none";
+    std::array<std::string, kMfdLineCount> telemetry_lines{{
+        "{ias:4.0f}KMH {alt:5.0f}M",
+        "M{mach:.2f} G{g:.1f}",
+        "{fuel_pct:3.0f}% {gear}",
+    }};
     std::array<std::string, kMfdLineCount> custom_text{{"X52 PRO", "LINUX DRIVER", ""}};
 };
 
@@ -100,6 +109,7 @@ struct Profile {
     Settings settings;
     std::array<AxisConfig, kAxisCount> axes{};
     std::array<ModeLayer, kModeCount> modes{};
+    std::vector<TelemetryRule> rules;
 
     static Profile make_default();
     // A profile with the vendor-style defaults (modes 1-3 with LED colours).

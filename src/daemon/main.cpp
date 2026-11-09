@@ -20,6 +20,10 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include <chrono>
+#include <mutex>
+#include <thread>
+
 #include <algorithm>
 #include <cerrno>
 #include <cstdio>
@@ -30,6 +34,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <map>
 
 #include <nlohmann/json.hpp>
 
@@ -42,6 +47,8 @@
 #include "x52/mfd.hpp"
 #include "x52/profile.hpp"
 #include "x52/settings.hpp"
+#include "x52/rules.hpp"
+#include "x52/telemetry.hpp"
 #include "x52/uinput.hpp"
 
 using json = nlohmann::json;
@@ -157,6 +164,11 @@ private:
     json cmd_text(const json& args);
     json cmd_apply_axis(const json& args);
     json cmd_settings(const json& args);
+    json cmd_set_telemetry(const json& args);
+    json telemetry_json();
+    TelemetrySample telemetry_snapshot() const;
+    std::array<std::string, kMfdLineCount> render_lines(uint64_t now) const;
+    void apply_rules(uint64_t now);
     json cmd_link_test();
     void mark_dirty();
     json diagnostics_json() const;
@@ -188,6 +200,15 @@ private:
     AppSettings settings_;
     bool dirty_settings_ = false;
     uint64_t last_change_us_ = 0;
+    std::thread tele_thread_;
+    mutable std::mutex tele_mutex_;
+    TelemetrySample telemetry_;
+    TelemetrySourceKind tele_kind_ = TelemetrySourceKind::None;
+    bool tele_stop_ = false;
+    std::vector<TelemetryRule> rules_;
+    std::map<Led, LedColor> forced_leds_;
+    uint64_t next_rules_us_ = 0;
+
     std::array<uint64_t, 512> frame_ring_{};
     std::size_t frame_pos_ = 0;
     std::size_t frame_filled_ = 0;
@@ -275,6 +296,58 @@ void Daemon::sync_clock() {
                       profile_.settings.clock_24h ? ClockFormat::H24 : ClockFormat::H12);
 }
 
+TelemetrySample Daemon::telemetry_snapshot() const {
+    std::lock_guard<std::mutex> lock(tele_mutex_);
+    return telemetry_;
+}
+
+std::array<std::string, kMfdLineCount> Daemon::render_lines(uint64_t now) const {
+    auto lines = engine_.render_mfd(now);
+    if (engine_.page() != MfdPage::Telemetry) return lines;
+
+    TelemetrySample snap = telemetry_snapshot();
+    if (snap.valid) {
+        for (std::size_t i = 0; i < kMfdLineCount; ++i) {
+            lines[i] = format_telemetry_line(profile_.settings.telemetry_lines[i], snap.values);
+        }
+        return lines;
+    }
+    lines[0] = "NO TELEMETRY";
+    lines[1] = snap.connected ? "NO FLIGHT DATA" : "GAME NOT RUNNING";
+    lines[2] = "PORT 8111";
+    return lines;
+}
+
+void Daemon::apply_rules(uint64_t now) {
+    TelemetrySample snap = telemetry_snapshot();
+    std::map<Led, LedColor> wanted;
+    if (snap.valid) wanted = evaluate_rules(rules_, snap.values);
+
+    std::array<LedColor, static_cast<std::size_t>(Led::Count)> theme{};
+    bool has_theme = engine_.current_leds(theme);
+    auto base = [&](Led led) {
+        return has_theme ? theme[static_cast<std::size_t>(led)] : LedColor::Off;
+    };
+
+    bool changed = false;
+    for (const auto& [led, color] : forced_leds_) {
+        if (!wanted.count(led) && leds_.get(led) != base(led)) {
+            leds_.set(led, base(led));
+            changed = true;
+        }
+    }
+    for (const auto& [led, color] : wanted) {
+        if (leds_.get(led) != color) {
+            leds_.set(led, color);
+            changed = true;
+        }
+    }
+    forced_leds_ = std::move(wanted);
+
+    if (changed && connected_) leds_.flush(dev_);
+    next_rules_us_ = now + 200000;
+}
+
 void Daemon::mark_dirty() {
     dirty_profile_ = true;
     dirty_settings_ = true;
@@ -301,6 +374,18 @@ void Daemon::apply_leds() {
 void Daemon::apply_profile(const Profile& p, bool save_as_current) {
     if (save_as_current) profile_name_ = p.name;
     engine_.set_profile(p);
+    rules_ = p.rules;
+    forced_leds_.clear();
+    {
+        TelemetrySourceKind kind = TelemetrySourceKind::None;
+        telemetry_source_from_name(p.settings.telemetry_source, kind);
+        std::lock_guard<std::mutex> lock(tele_mutex_);
+        if (kind != tele_kind_) {
+            tele_kind_ = kind;
+            telemetry_ = TelemetrySample{};
+            telemetry_.source = telemetry_source_name(kind);
+        }
+    }
     mfd_.set_brightness(static_cast<uint8_t>(p.settings.mfd_brightness));
     leds_.set_brightness(static_cast<uint8_t>(p.settings.led_brightness));
     sync_clock();
@@ -323,7 +408,7 @@ json Daemon::state_json() const {
     j["profile_dirty"] = dirty_profile_;
     j["grabbed"] = grabbed_;
 
-    auto lines = engine_.render_mfd(now_us());
+    auto lines = render_lines(now_us());
     j["mfd"] = json::array({lines[0], lines[1], lines[2]});
     j["mfd_brightness"] = profile_.settings.mfd_brightness;
     j["led_brightness"] = profile_.settings.led_brightness;
@@ -535,6 +620,75 @@ json Daemon::cmd_apply_axis(const json& args) {
         if (args.contains("invert")) cfg.invert = jbool(args, "invert", false);
         mark_dirty();
     }
+    return {{"ok", true}};
+}
+
+json Daemon::telemetry_json() {
+    TelemetrySample snap = telemetry_snapshot();
+    json j;
+    j["source"] = snap.source.empty() ? "none" : snap.source;
+    j["connected"] = snap.connected;
+    j["valid"] = snap.valid;
+    j["error"] = snap.error;
+    j["values"] = snap.values;
+
+    json lines = json::array();
+    for (std::size_t i = 0; i < kMfdLineCount; ++i) {
+        lines.push_back(snap.valid ? format_telemetry_line(profile_.settings.telemetry_lines[i],
+                                                           snap.values)
+                                   : std::string());
+    }
+    j["lines"] = lines;
+    j["rules"] = static_cast<int>(rules_.size());
+    return j;
+}
+
+json Daemon::cmd_set_telemetry(const json& args) {
+    Profile& p = engine_.profile_mut();
+
+    if (args.contains("source")) {
+        std::string name = args.value("source", std::string("none"));
+        TelemetrySourceKind kind{};
+        if (!telemetry_source_from_name(name, kind)) return {{"error", "unknown source"}};
+        p.settings.telemetry_source = telemetry_source_name(kind);
+        {
+            std::lock_guard<std::mutex> lock(tele_mutex_);
+            if (kind != tele_kind_) {
+                tele_kind_ = kind;
+                telemetry_ = TelemetrySample{};
+                telemetry_.source = telemetry_source_name(kind);
+            }
+        }
+    }
+
+    if (args.contains("lines") && args["lines"].is_array()) {
+        for (std::size_t i = 0; i < kMfdLineCount && i < args["lines"].size(); ++i) {
+            if (args["lines"][i].is_string()) {
+                p.settings.telemetry_lines[i] = args["lines"][i].get<std::string>();
+            }
+        }
+    }
+
+    if (args.contains("rules") && args["rules"].is_array()) {
+        std::vector<TelemetryRule> rules;
+        for (const auto& item : args["rules"]) {
+            if (!item.is_object()) continue;
+            TelemetryRule rule;
+            rule.name = item.value("name", std::string());
+            rule.condition = item.value("when", std::string());
+            rule.enabled = jbool(item, "enabled", true);
+            led_from_name(item.value("led", std::string("fire")), rule.led);
+            led_color_from_name(item.value("color", std::string("amber")), rule.color);
+            if (!rule.condition.empty()) rules.push_back(std::move(rule));
+        }
+        rules_ = rules;
+        p.rules = rules;
+        forced_leds_.clear();
+    }
+
+    mark_dirty();
+    next_mfd_us_ = 0;
+    next_rules_us_ = 0;
     return {{"ok", true}};
 }
 
@@ -782,6 +936,10 @@ void Daemon::handle_request(Client& c, const json& req) {
         reply(c, req, json::parse(settings_.to_json_string(0)));
     } else if (cmd == "set_settings") {
         reply(c, req, cmd_settings(args));
+    } else if (cmd == "telemetry") {
+        reply(c, req, telemetry_json());
+    } else if (cmd == "set_telemetry") {
+        reply(c, req, cmd_set_telemetry(args));
     } else if (cmd == "link_test") {
         reply(c, req, cmd_link_test());
     } else if (cmd == "drift") {
@@ -973,6 +1131,37 @@ int Daemon::run() {
                  mfd_page_name(engine_.page()), profile_name_.c_str());
 
     cached_profiles_ = list_profiles();
+    tele_thread_ = std::thread([this] {
+        std::unique_ptr<TelemetrySource> source;
+        TelemetrySourceKind active = TelemetrySourceKind::None;
+        while (!tele_stop_) {
+            TelemetrySourceKind kind;
+            {
+                std::lock_guard<std::mutex> lock(tele_mutex_);
+                kind = tele_kind_;
+            }
+            if (kind != active) {
+                source = make_telemetry_source(kind);
+                active = kind;
+                std::lock_guard<std::mutex> lock(tele_mutex_);
+                telemetry_ = TelemetrySample{};
+                telemetry_.source = telemetry_source_name(kind);
+            }
+            if (source) {
+                TelemetryValues values;
+                std::string error;
+                bool ok = source->poll(values, error);
+                std::lock_guard<std::mutex> lock(tele_mutex_);
+                telemetry_.valid = ok;
+                telemetry_.connected = ok;
+                telemetry_.error = ok ? std::string() : error;
+                if (ok) telemetry_.values = std::move(values);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+    });
+    tele_thread_.detach();
+
     if (!try_connect()) next_reconnect_us_ = now_us() + kReconnectUs;
 
     std::printf("x52d: listening on %s\n", sock_path_.c_str());
@@ -1032,7 +1221,7 @@ int Daemon::run() {
             }
 
             if (t >= next_mfd_us_) {
-                auto lines = engine_.render_mfd(t);
+                auto lines = render_lines(t);
                 mfd_.set_line(0, lines[0]);
                 mfd_.set_line(1, lines[1]);
                 mfd_.set_line(2, lines[2]);
@@ -1042,6 +1231,8 @@ int Daemon::run() {
                 next_mfd_us_ = t + kMfdRefreshUs;
             }
         }
+
+        if (t >= next_rules_us_ && !rules_.empty()) apply_rules(t);
 
         if (input_changed && t - last_input_push_us_ >= kInputPushUs) {
             json frame{{"event", "input"}, {"data", input_frame()}};

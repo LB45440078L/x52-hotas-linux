@@ -38,6 +38,17 @@ HOTAS driver and profiler.
   verify the link at startup, autosave toggle, and a link test that times 20
   vendor control transfers.
 
+### Game telemetry
+- Telemetry sources poll a game's supported data feed and publish named values
+  (5 Hz, dedicated thread, never blocks input).
+- War Thunder source: `/state` + `/indicators` on localhost:8111.
+- MFD templates per line, e.g. `{ias:4.0f}KMH {alt:5.0f}M`.
+- LED rules: arithmetic/boolean conditions over telemetry with later-wins
+  priority, evaluated 5 times per second, falling back to the mode colour.
+- Panel: Telemetry page (source, live values, layout, rule editor) and
+  `x52ctl telemetry`.
+- `tools/fake-warthunder.py` for testing without the game.
+
 ### Live updates
 - The daemon pushes compact input frames (raw axes + button bitmask) at up to
   250 Hz, bounded by the device's own report rate (~60 Hz on the tested unit).

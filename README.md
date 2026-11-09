@@ -46,6 +46,13 @@ hardware through the documented vendor control channel.
 - Health check: permissions, endpoints, virtual devices, grab, rest
   positions, stuck buttons, clock refresh
 
+**Game telemetry (War Thunder first)**
+
+- Flight data from the game's own local API: no hooks, no memory reading
+- MFD layout templates: speed, altitude, mach, G, fuel, gear, compass
+- LED rules over telemetry, e.g. gear up turns T3 red, high G pulses FIRE
+- Sources are swappable: DCS and Elite Dangerous fit the same pipeline
+
 **Modes, profiles, remapping**
 
 - Three hardware modes (M1/M2/M3) with independent bindings and LED themes
@@ -103,7 +110,7 @@ sudo ./scripts/install-udev.sh
 
 ### Control panel
 
-`x52panel` has seven pages:
+`x52panel` has eight pages:
 
 | Page | What it does |
 | --- | --- |
@@ -113,6 +120,7 @@ sudo ./scripts/install-udev.sh
 | Buttons | per-mode and shift-layer bindings for all 39 buttons |
 | Test | live input, stick/throttle visualisation, drift, axis feel, diagnosis |
 | Profiles | activate, save, create, delete profiles |
+| Telemetry | game source, MFD layout, LED rules over flight data |
 | Settings | autostart, start minimised, autosave, USB link test, capabilities |
 
 ### Command line
