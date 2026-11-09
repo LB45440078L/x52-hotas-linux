@@ -19,6 +19,9 @@ struct AppSettings {
     bool autostart = false;         // install an XDG autostart entry
     bool start_minimized = false;   // start with the window hidden
     bool verify_link = true;        // run the USB link check at startup
+    // Expose a uinput joystick (needed for remapping; it also shows up in games
+    // as a second controller, which shifts their saved axis indices).
+    bool virtual_joystick = true;
 
     // Last session, restored on start.
     std::string last_profile = "Default";

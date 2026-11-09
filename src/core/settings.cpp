@@ -51,6 +51,7 @@ std::string AppSettings::to_json_string(int indent) const {
     j["autostart"] = autostart;
     j["start_minimized"] = start_minimized;
     j["verify_link"] = verify_link;
+    j["virtual_joystick"] = virtual_joystick;
     j["autosave"] = autosave;
     j["last_profile"] = last_profile;
     j["last_mode"] = last_mode;
@@ -65,6 +66,7 @@ bool AppSettings::from_json_string(const std::string& text, AppSettings& out) {
         out.autostart = j.value("autostart", out.autostart);
         out.start_minimized = j.value("start_minimized", out.start_minimized);
         out.verify_link = j.value("verify_link", out.verify_link);
+        out.virtual_joystick = j.value("virtual_joystick", out.virtual_joystick);
         out.autosave = j.value("autosave", out.autosave);
         out.last_profile = j.value("last_profile", out.last_profile);
         out.last_mode = j.value("last_mode", out.last_mode);

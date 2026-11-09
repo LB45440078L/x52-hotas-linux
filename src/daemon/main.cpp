@@ -254,8 +254,10 @@ bool Daemon::try_connect() {
     apply_leds();
     next_mfd_us_ = 0;
 
-    if (profile_.settings.grab_device) {
+    if (settings_.virtual_joystick && profile_.settings.grab_device) {
         grabbed_ = input_.set_grab(true);
+    } else {
+        grabbed_ = false;
     }
 
     if (settings_.verify_link) {
@@ -701,6 +703,9 @@ json Daemon::cmd_settings(const json& args) {
         settings_.verify_link = jbool(args, "verify_link", settings_.verify_link);
     }
     if (args.contains("autosave")) settings_.autosave = jbool(args, "autosave", settings_.autosave);
+    if (args.contains("virtual_joystick")) {
+        settings_.virtual_joystick = jbool(args, "virtual_joystick", settings_.virtual_joystick);
+    }
 
     if (args.contains("autostart") || args.contains("start_minimized")) {
         std::string error;
@@ -1042,6 +1047,9 @@ int Daemon::run() {
     ::signal(SIGPIPE, SIG_IGN);
     ::signal(SIGCHLD, SIG_IGN);
 
+    // Settings must be known before any device is created.
+    if (!settings_.load()) settings_.save();
+
     sock_path_ = socket_path();
     ::unlink(sock_path_.c_str());
     listen_fd_ = ::socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
@@ -1059,9 +1067,14 @@ int Daemon::run() {
     ::chmod(sock_path_.c_str(), 0600);
     ::listen(listen_fd_, 8);
 
-    // Virtual devices.
-    if (!uinput_.create_joystick("X52 Pro (x52d)")) {
-        std::fprintf(stderr, "x52d: %s\n", uinput_.error().c_str());
+    // Virtual devices.  The joystick is optional: games list it as a second
+    // controller and then their saved axis indices no longer line up.
+    if (settings_.virtual_joystick) {
+        if (!uinput_.create_joystick("X52 Pro (x52d)")) {
+            std::fprintf(stderr, "x52d: %s\n", uinput_.error().c_str());
+        }
+    } else {
+        std::fprintf(stderr, "x52d: virtual joystick disabled (games use the physical stick)\n");
     }
     if (!uinput_.create_keyboard("X52 Pro Keyboard (x52d)")) {
         std::fprintf(stderr, "x52d: %s\n", uinput_.error().c_str());
@@ -1086,17 +1099,9 @@ int Daemon::run() {
 
     // Restore the last session: settings tell us which profile, mode and page
     // were active when the daemon last stopped.
-    {
-        std::string load_error;
-        if (!settings_.load(&load_error)) {
-            std::fprintf(stderr, "x52d: settings: %s (writing defaults)\n", load_error.c_str());
-            settings_.save();
-        } else {
-            std::fprintf(stderr, "x52d: settings: restored profile=%s mode=%d page=%s\n",
-                         settings_.last_profile.c_str(), settings_.last_mode,
-                         settings_.last_page.c_str());
-        }
-    }
+    std::fprintf(stderr, "x52d: settings: profile=%s mode=%d page=%s joystick=%s\n",
+                 settings_.last_profile.c_str(), settings_.last_mode,
+                 settings_.last_page.c_str(), settings_.virtual_joystick ? "virtual" : "physical");
     dirty_settings_ = false;
 
     Profile initial;
@@ -1206,7 +1211,7 @@ int Daemon::run() {
                 prev_ = state_;
                 input_changed = true;
                 uinput_.sync_joystick();
-                if (profile_.settings.grab_device && !grabbed_) {
+                if (settings_.virtual_joystick && profile_.settings.grab_device && !grabbed_) {
                     grabbed_ = input_.set_grab(true);
                 } else if (!profile_.settings.grab_device && grabbed_) {
                     input_.set_grab(false);
