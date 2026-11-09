@@ -1,0 +1,22 @@
+# Logitech / Saitek X52 Pro HOTAS (06a3:0762)
+#
+# The MFD/LED channel uses vendor control requests on the device node, so the
+# user needs write access to /dev/bus/usb/BBB/DDD.  raw hidraw access lets the
+# daemon read the unmodified 15-byte input report, and the evdev node is used
+# when the daemon grabs the stick for remapping.
+
+# NOTE: the file must sort before 73-seat-late.rules, otherwise the uaccess
+# tag is applied after the ACL builtin has already run and no ACL is set.
+# GROUP="users" is kept as a fallback for systems without uaccess support.
+
+# USB device node: vendor control transfers.
+SUBSYSTEM=="usb", ATTR{idVendor}=="06a3", ATTR{idProduct}=="0762", MODE="0660", GROUP="users", TAG+="uaccess"
+
+# Raw HID reports (input side).
+KERNEL=="hidraw*", ATTRS{idVendor}=="06a3", ATTRS{idProduct}=="0762", MODE="0660", GROUP="users", TAG+="uaccess"
+
+# evdev node, needed to grab the stick while remapping is active.
+KERNEL=="event*", ATTRS{idVendor}=="06a3", ATTRS{idProduct}=="0762", MODE="0660", GROUP="users", TAG+="uaccess"
+
+# Traditional joystick node, harmless but useful for other software.
+KERNEL=="js*", ATTRS{idVendor}=="06a3", ATTRS{idProduct}=="0762", MODE="0660", GROUP="users", TAG+="uaccess"

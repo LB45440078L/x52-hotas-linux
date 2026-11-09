@@ -1,0 +1,105 @@
+{
+  "description": "Shows off modes, LED themes, a macro and MFD pages.",
+  "modes": {
+    "1": {
+      "buttons": {
+        "38": {
+          "action": "mfd_page",
+          "page": "clock"
+        }
+      },
+      "leds": {
+        "a": "green",
+        "b": "green",
+        "clutch": "off",
+        "d": "off",
+        "e": "green",
+        "fire": "amber",
+        "pov": "green",
+        "t1": "green",
+        "t2": "green",
+        "t3": "off",
+        "throttle": "amber"
+      },
+      "mfd": [
+        "NAVIGATION",
+        "MODE 1",
+        ""
+      ],
+      "name": "Navigation"
+    },
+    "2": {
+      "buttons": {
+        "1": {
+          "action": "macro",
+          "sequence": [
+            "text:hello world",
+            "delay:60",
+            "enter"
+          ]
+        }
+      },
+      "leds": {
+        "a": "red",
+        "b": "amber",
+        "clutch": "amber",
+        "d": "off",
+        "e": "red",
+        "fire": "red",
+        "pov": "red",
+        "t1": "red",
+        "t2": "amber",
+        "t3": "off",
+        "throttle": "red"
+      },
+      "mfd": [
+        "COMBAT",
+        "MODE 2",
+        ""
+      ],
+      "name": "Combat"
+    },
+    "3": {
+      "leds": {
+        "a": "amber",
+        "b": "amber",
+        "clutch": "green",
+        "d": "off",
+        "e": "amber",
+        "fire": "green",
+        "pov": "amber",
+        "t1": "amber",
+        "t2": "green",
+        "t3": "off",
+        "throttle": "green"
+      },
+      "mfd": [
+        "DOCKING",
+        "MODE 3",
+        ""
+      ],
+      "name": "Docking"
+    }
+  },
+  "name": "Demo",
+  "schema": 1,
+  "settings": {
+    "clock2_offset": 0,
+    "clock3_offset": 0,
+    "clock_24h": true,
+    "clock_show_date": true,
+    "clutch_as_shift": false,
+    "custom_text": [
+      "X52 PRO",
+      "LINUX DRIVER",
+      ""
+    ],
+    "grab_device": true,
+    "led_brightness": 128,
+    "mfd_brightness": 128,
+    "mfd_clock_label": "X52 PRO",
+    "mfd_page": "status",
+    "mode_indicators": true,
+    "shift_on_pinky": true
+  }
+}

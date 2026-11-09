@@ -1,0 +1,35 @@
+{
+  "description": "Passthrough profile: every button and axis behaves like a plain joystick.",
+  "modes": {
+    "1": {
+      "name": ""
+    },
+    "2": {
+      "name": ""
+    },
+    "3": {
+      "name": ""
+    }
+  },
+  "name": "Default",
+  "schema": 1,
+  "settings": {
+    "clock2_offset": 0,
+    "clock3_offset": 0,
+    "clock_24h": true,
+    "clock_show_date": true,
+    "clutch_as_shift": false,
+    "custom_text": [
+      "X52 PRO",
+      "LINUX DRIVER",
+      ""
+    ],
+    "grab_device": true,
+    "led_brightness": 128,
+    "mfd_brightness": 128,
+    "mfd_clock_label": "X52 PRO",
+    "mfd_page": "status",
+    "mode_indicators": true,
+    "shift_on_pinky": true
+  }
+}

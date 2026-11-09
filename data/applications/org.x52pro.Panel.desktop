@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=X52 Pro Control
+GenericName=HOTAS configuration
+Comment=Configure the Logitech/Saitek X52 Pro HOTAS
+Exec=x52panel
+Icon=org.x52pro.Panel
+Terminal=false
+Categories=Settings;HardwareSettings;
+Keywords=joystick;hotas;x52;saitek;logitech;flight;
+StartupNotify=true
