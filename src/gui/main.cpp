@@ -52,6 +52,9 @@ const char* kAxisLabels[] = {"Roll (X)", "Pitch (Y)", "Yaw (twist)", "Throttle",
                              "Rotary X", "Rotary Y", "Slider", nullptr};
 const char* kAxisIds[] = {"x", "y", "twist", "throttle", "rotary-x", "rotary-y", "slider",
                           nullptr};
+// Zero-based axis index as the kernel and games enumerate it (X Y Z RX RY RZ
+// THROTTLE).  Games show these 1-based in their dropdowns, so add one.
+const int kAxisGameIds[] = {0, 1, 5, 2, 3, 4, 6};
 
 struct App {
     GtkApplication* app = nullptr;
@@ -1383,10 +1386,13 @@ GtkWidget* build_test(App* a) {
     gtk_widget_set_hexpand(meters, TRUE);
     for (std::size_t i = 0; i < kAxisCount; ++i) {
         GtkWidget* line = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
-        GtkWidget* name = gtk_label_new(kAxisLabels[i]);
+        char axis_label[64];
+        std::snprintf(axis_label, sizeof axis_label, "%d  %s",
+                      kAxisGameIds[i] + 1, kAxisLabels[i]);
+        GtkWidget* name = gtk_label_new(axis_label);
         gtk_label_set_xalign(GTK_LABEL(name), 0.0f);
         gtk_widget_add_css_class(name, "row-sub");
-        gtk_widget_set_size_request(name, 92, -1);
+        gtk_widget_set_size_request(name, 116, -1);
         GtkWidget* bar = gtk_progress_bar_new();
         gtk_widget_set_hexpand(bar, TRUE);
         a->axis_bars[i] = bar;
@@ -1409,15 +1415,26 @@ GtkWidget* build_test(App* a) {
     gtk_widget_set_margin_end(grid, 18);
     gtk_widget_set_margin_bottom(grid, 16);
     for (int i = 0; i < static_cast<int>(kButtonCount); ++i) {
-        std::string label(button_name(static_cast<Button>(i)));
-        GtkWidget* p = gtk_label_new(label.c_str());
+        char btn_label[96];
+        std::snprintf(btn_label, sizeof btn_label, "%d  %s", i,
+                      button_name(static_cast<Button>(i)).data());
+        GtkWidget* p = gtk_label_new(btn_label);
         gtk_widget_add_css_class(p, "key-pill");
         gtk_label_set_ellipsize(GTK_LABEL(p), PANGO_ELLIPSIZE_END);
-        gtk_widget_set_size_request(p, 104, -1);
+        gtk_widget_set_size_request(p, 124, -1);
         gtk_grid_attach(GTK_GRID(grid), p, i % 6, i / 6, 1, 1);
         a->button_pills[i] = p;
     }
     gtk_box_append(GTK_BOX(live), grid);
+
+    GtkWidget* grid_note = gtk_label_new(
+        "Numbers match the game and the .blk: buttons 0-38, axes 0-10. "
+        "War Thunder's own lists start at one, so add one there.");
+    gtk_widget_add_css_class(grid_note, "row-sub");
+    gtk_label_set_xalign(GTK_LABEL(grid_note), 0.0f);
+    gtk_widget_set_margin_start(grid_note, 18);
+    gtk_widget_set_margin_top(grid_note, 6);
+    gtk_box_append(GTK_BOX(live), grid_note);
 
     GtkWidget* extra = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 26);
     gtk_widget_set_margin_top(extra, 14);
