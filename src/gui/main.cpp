@@ -1390,6 +1390,11 @@ GtkWidget* build_test(App* a) {
         std::snprintf(axis_label, sizeof axis_label, "%d  %s",
                       kAxisGameIds[i] + 1, kAxisLabels[i]);
         GtkWidget* name = gtk_label_new(axis_label);
+        char axis_tip[128];
+        std::snprintf(axis_tip, sizeof axis_tip,
+                      "War Thunder: C1 axis %d\n.blk: axisId:i=%d",
+                      kAxisGameIds[i] + 1, kAxisGameIds[i]);
+        gtk_widget_set_tooltip_text(name, axis_tip);
         gtk_label_set_xalign(GTK_LABEL(name), 0.0f);
         gtk_widget_add_css_class(name, "row-sub");
         gtk_widget_set_size_request(name, 116, -1);
@@ -1415,10 +1420,17 @@ GtkWidget* build_test(App* a) {
     gtk_widget_set_margin_end(grid, 18);
     gtk_widget_set_margin_bottom(grid, 16);
     for (int i = 0; i < static_cast<int>(kButtonCount); ++i) {
+        // War Thunder counts from one and prefixes the controller ("C1 button 2"),
+        // the .blk counts from zero.  Lead with the number people read in the
+        // game and keep the file's index in the tooltip.
         char btn_label[96];
-        std::snprintf(btn_label, sizeof btn_label, "%d  %s", i,
+        std::snprintf(btn_label, sizeof btn_label, "%d  %s", i + 1,
                       button_name(static_cast<Button>(i)).data());
         GtkWidget* p = gtk_label_new(btn_label);
+        char btn_tip[128];
+        std::snprintf(btn_tip, sizeof btn_tip,
+                      "War Thunder: C1 button %d\n.blk: joyButton:i=%d", i + 1, i);
+        gtk_widget_set_tooltip_text(p, btn_tip);
         gtk_widget_add_css_class(p, "key-pill");
         gtk_label_set_ellipsize(GTK_LABEL(p), PANGO_ELLIPSIZE_END);
         gtk_widget_set_size_request(p, 124, -1);
@@ -1428,8 +1440,8 @@ GtkWidget* build_test(App* a) {
     gtk_box_append(GTK_BOX(live), grid);
 
     GtkWidget* grid_note = gtk_label_new(
-        "Numbers match the game and the .blk: buttons 0-38, axes 0-10. "
-        "War Thunder's own lists start at one, so add one there.");
+        "Numbered as War Thunder shows them — C1 button 1 is the trigger. "
+        "The .blk file counts from zero, one lower; hover a key for both.");
     gtk_widget_add_css_class(grid_note, "row-sub");
     gtk_label_set_xalign(GTK_LABEL(grid_note), 0.0f);
     gtk_widget_set_margin_start(grid_note, 18);
