@@ -1,5 +1,11 @@
 # X52 Pro on Linux
 
+[![Build](https://github.com/LB45440078L/x52-hotas-linux/actions/workflows/build.yml/badge.svg)](https://github.com/LB45440078L/x52-hotas-linux/actions/workflows/build.yml)
+[![License: BSD-3-Clause](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)](LICENSE)
+[![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C.svg)](https://en.cppreference.com/w/cpp/20)
+[![GTK4](https://img.shields.io/badge/UI-GTK4%20%7C%20libadwaita-4A86CF.svg)](https://gnome.pages.gitlab.gnome.org/libadwaita/)
+[![Kernel](https://img.shields.io/badge/kernel-hidraw%20%7C%20evdev%20%7C%20uinput-lightgrey.svg)](#requirements)
+
 A native, open source driver and control panel for the **Logitech / Saitek X52
 Pro H.O.T.A.S.** — the full feature set of the Windows "X52 Professional
 HOTAS" software, reimplemented for Linux.
@@ -18,6 +24,20 @@ hardware through the documented vendor control channel.
            │                                  ▼
       x52ctl (CLI)                 virtual joystick / keyboard / mouse
 ```
+
+## Quick start
+
+```bash
+git clone https://github.com/LB45440078L/x52-hotas-linux.git
+cd x52-hotas-linux
+
+make                 # configure and build everything
+make test            # run the unit tests
+make install         # binaries, default profile and the systemd user service
+make udev            # udev rules (asks for sudo, once)
+```
+
+Then open **X52 Pro Control** from your application menu, or run `x52panel`.
 
 ## What works
 
@@ -69,6 +89,16 @@ hardware through the documented vendor control channel.
 The daemon grabs the physical evdev node and re-emits everything through a
 virtual joystick, so games see exactly one controller — the remapped one.
 
+## Screenshots
+
+| Control panel | Test bench: live axes, buttons, POV and ministick |
+| --- | --- |
+| ![Control panel](docs/images/overview.png) | ![Test bench](docs/images/test.png) |
+
+| Telemetry from War Thunder on the MFD | LEDs, brightness and the hardware clock |
+| --- | --- |
+| ![Telemetry](docs/images/telemetry.png) | ![LEDs](docs/images/leds.png) |
+
 ## Requirements
 
 - Linux with `evdev`, `uinput` and `hidraw` (any modern distribution)
@@ -76,8 +106,10 @@ virtual joystick, so games see exactly one controller — the remapped one.
 - GTK4 + libadwaita (only for the panel)
 - A C++20 compiler and CMake ≥ 3.20
 
-Tested on CachyOS/Arch with kernel 7.3, GNOME/Wayland, firmware
-`bcdDevice 20.00` (Logitech, 2018).
+Tested on Arch-based distributions with a 6.x/7.x kernel, on GNOME and KDE under
+Wayland, against Logitech firmware `bcdDevice 20.00` (2018). It should work on
+any distribution that ships a 5.15+ kernel; nothing here is distribution
+specific.
 
 ## Install
 
