@@ -1,0 +1,8 @@
+# The YUNZII keyboard's "System Control" HID interface exposes ABS_HAT0X/HAT0Y,
+# so systemd's input_id builtin tags it ID_INPUT_JOYSTICK=1 and SDL advertises it
+# to games as a gamepad. War Thunder then lists it as a controller with three
+# thumbstick axes, and binds saved while it is present get written against it
+# ("L.thumb.h", "R.thumb.h") instead of the X52.
+#
+# Runs after 60-input-id.rules, which is what sets the flag in the first place.
+ACTION!="remove", SUBSYSTEM=="input", ATTRS{name}=="hfd YUNZII B98 PRO Keyboard System Control", ENV{ID_INPUT_JOYSTICK}="0", ENV{ID_INPUT_GAMECONTROLLER}="0", ENV{ID_INPUT_GAMEPAD}="0"
