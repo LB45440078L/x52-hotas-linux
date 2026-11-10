@@ -298,7 +298,19 @@ void Uinput::axis(int index, int value) {
     static constexpr uint16_t kAxisCodes[kAxisCount] = {
         ABS_X, ABS_Y, ABS_RZ, ABS_Z, ABS_RX, ABS_RY, ABS_MISC,
     };
+    // Hysteresis: an untouched potentiometer jitters by a unit or two, and a
+    // game's binding wizard treats any axis motion as "the user moved this
+    // axis" and captures it. Stay silent unless the axis really moved.
+    static int last[kAxisCount] = {-1, -1, -1, -1, -1, -1, -1};
     if (index < 0 || index >= static_cast<int>(kAxisCount)) return;
+    const bool coarse = kAxisCodes[index] == ABS_Z || kAxisCodes[index] == ABS_RX ||
+                        kAxisCodes[index] == ABS_RY || kAxisCodes[index] == ABS_MISC;
+    const int threshold = coarse ? 3 : 6;          // 0-255 or 0-1023 scale
+    const int maximum = coarse ? 255 : 1023;
+    int delta = value - last[index];
+    if (delta < 0) delta = -delta;
+    if (last[index] >= 0 && delta < threshold && value != 0 && value != maximum) return;
+    last[index] = value;
     EventWriter{joy_fd_}.write_event(EV_ABS, kAxisCodes[index], value);
 }
 
